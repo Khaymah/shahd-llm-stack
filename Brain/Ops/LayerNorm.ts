@@ -15,44 +15,56 @@ export function LayerNorm(X: Tensor, Gamma: Tensor, Beta: Tensor, Eps: number): 
   const Out = new Tensor(M, N, undefined, [X, Gamma, Beta]);
   const XHat = new Float64Array(M * N);
   const InvStd = new Float64Array(M);
+  const XData = X.Data;
+  const GammaData = Gamma.Data;
+  const BetaData = Beta.Data;
+  const OutData = Out.Data;
 
   for (let I = 0; I < M; I++) {
+    const Row = I * N;
     let Mu = 0;
-    for (let J = 0; J < N; J++) Mu += X.Data[I * N + J];
+    for (let J = 0; J < N; J++) Mu += XData[Row + J];
     Mu /= N;
     let Var = 0;
     for (let J = 0; J < N; J++) {
-      const D = X.Data[I * N + J] - Mu;
+      const D = XData[Row + J] - Mu;
       Var += D * D;
     }
     Var /= N;
     const Is = 1 / Math.sqrt(Var + Eps);
     InvStd[I] = Is;
     for (let J = 0; J < N; J++) {
-      const Xh = (X.Data[I * N + J] - Mu) * Is;
-      XHat[I * N + J] = Xh;
-      Out.Data[I * N + J] = Gamma.Data[J] * Xh + Beta.Data[J];
+      const Xh = (XData[Row + J] - Mu) * Is;
+      XHat[Row + J] = Xh;
+      OutData[Row + J] = GammaData[J] * Xh + BetaData[J];
     }
   }
 
   if (Tape.On) {
     Out.BackwardFn = () => {
+      const OutGrad = Out.Grad;
+      const GammaIn = Gamma.Data;
+      const GammaGrad = Gamma.Grad;
+      const BetaGrad = Beta.Grad;
+      const XGrad = X.Grad;
+      // One row-scratch per backward call (not per row): every row fully overwrites it before reading.
+      const DXHat = new Float64Array(N);
       for (let I = 0; I < M; I++) {
+        const Row = I * N;
         let SumDXHat = 0;
         let SumDXHatXHat = 0;
-        const DXHat = new Float64Array(N);
         for (let J = 0; J < N; J++) {
-          const Dy = Out.Grad[I * N + J];
-          const Dxh = Dy * Gamma.Data[J];
+          const Dy = OutGrad[Row + J];
+          const Dxh = Dy * GammaIn[J];
           DXHat[J] = Dxh;
           SumDXHat += Dxh;
-          SumDXHatXHat += Dxh * XHat[I * N + J];
-          Gamma.Grad[J] += Dy * XHat[I * N + J];
-          Beta.Grad[J] += Dy;
+          SumDXHatXHat += Dxh * XHat[Row + J];
+          GammaGrad[J] += Dy * XHat[Row + J];
+          BetaGrad[J] += Dy;
         }
         const Is = InvStd[I];
         for (let J = 0; J < N; J++) {
-          X.Grad[I * N + J] += (Is / N) * (N * DXHat[J] - SumDXHat - XHat[I * N + J] * SumDXHatXHat);
+          XGrad[Row + J] += (Is / N) * (N * DXHat[J] - SumDXHat - XHat[Row + J] * SumDXHatXHat);
         }
       }
     };

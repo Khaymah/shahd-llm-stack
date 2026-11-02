@@ -15,6 +15,8 @@ import {
   LayerNorm,
   EmbeddingLookup,
   CrossEntropy,
+  MaskedCrossEntropy,
+  MatMulNT,
 } from "../Brain/Ops/OpsBarrel.ts";
 
 function RandTensor(Rows: number, Cols: number, Rng: SeededRng, Scale = 1): Tensor {
@@ -133,4 +135,33 @@ test("CrossEntropy gradient is correct", () => {
   const Logits = RandTensor(4, 6, Rng);
   const Targets = [0, 3, 5, 1];
   expect(GradCheck([Logits], () => CrossEntropy(Logits, Targets)).Passed).toBe(true);
+});
+
+test("CrossEntropy loss is exact log-sum-exp (no 1e-12 floor) for a very unlikely target", () => {
+  // Target logit 40 below its competitor: -log p = log(1 + e^40) ≈ 40. The old -log(p + 1e-12)
+  // capped this at -log(1e-12) ≈ 27.63 while the gradient kept saying p ≈ 4e-18.
+  const Logits = new Tensor(1, 2);
+  Logits.Data.set([0, -40]);
+  const Loss = CrossEntropy(Logits, [1]);
+  expect(Math.abs(Loss.Data[0] - (40 + Math.log1p(Math.exp(-40))))).toBeLessThan(1e-12);
+  const Masked = MaskedCrossEntropy(Logits, [1], [true]);
+  expect(Masked.Data[0]).toBe(Loss.Data[0]);
+});
+
+test("MaskedCrossEntropy gradient is correct and ignores masked-out rows", () => {
+  const Rng = new SeededRng(12);
+  const Logits = RandTensor(4, 5, Rng);
+  const Targets = [1, 0, 4, 2];
+  const Mask = [true, false, true, false];
+  expect(GradCheck([Logits], () => MaskedCrossEntropy(Logits, Targets, Mask)).Passed).toBe(true);
+  // Masked-out targets are never validated or read — an out-of-range id there is harmless.
+  expect(() => MaskedCrossEntropy(Logits, [1, 99, 4, 2], Mask)).not.toThrow();
+});
+
+test("MatMulNT gradient is correct", () => {
+  const Rng = new SeededRng(13);
+  const A = RandTensor(3, 4, Rng);
+  const B = RandTensor(5, 4, Rng);
+  const R = RandVec(15, Rng);
+  expect(GradCheck([A, B], () => ProjectScalar(MatMulNT(A, B), R)).Passed).toBe(true);
 });

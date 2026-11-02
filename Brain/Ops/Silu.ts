@@ -4,20 +4,27 @@
 import { Tensor } from "../Tensor/Tensor.ts";
 import { Tape } from "../Tensor/Tape.ts";
 
+/** Scalar SiLU, x * sigmoid(x) — the one forward formula (the KV-cached decode path reuses it). */
+export function SiluValue(V: number): number {
+  return V * (1 / (1 + Math.exp(-V)));
+}
+
 export function Silu(X: Tensor): Tensor {
+  const Size = X.Size;
   const Out = new Tensor(X.Rows, X.Cols, undefined, [X]);
-  for (let I = 0; I < X.Size; I++) {
-    const V = X.Data[I];
-    const Sig = 1 / (1 + Math.exp(-V));
-    Out.Data[I] = V * Sig;
-  }
+  const XData = X.Data;
+  const OutData = Out.Data;
+  for (let I = 0; I < Size; I++) OutData[I] = SiluValue(XData[I]);
 
   if (Tape.On) {
     Out.BackwardFn = () => {
-      for (let I = 0; I < X.Size; I++) {
-        const V = X.Data[I];
+      const XIn = X.Data;
+      const XGrad = X.Grad;
+      const OutGrad = Out.Grad;
+      for (let I = 0; I < Size; I++) {
+        const V = XIn[I];
         const Sig = 1 / (1 + Math.exp(-V));
-        X.Grad[I] += Sig * (1 + V * (1 - Sig)) * Out.Grad[I];
+        XGrad[I] += Sig * (1 + V * (1 - Sig)) * OutGrad[I];
       }
     };
   }

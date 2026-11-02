@@ -7,14 +7,21 @@ export function Add(A: Tensor, B: Tensor): Tensor {
   if (A.Rows !== B.Rows || A.Cols !== B.Cols) {
     throw new Error(`Add: shape mismatch ${A.Rows}x${A.Cols} vs ${B.Rows}x${B.Cols}`);
   }
+  const Size = A.Size;
   const Out = new Tensor(A.Rows, A.Cols, undefined, [A, B]);
-  for (let I = 0; I < A.Size; I++) Out.Data[I] = A.Data[I] + B.Data[I];
+  const AData = A.Data;
+  const BData = B.Data;
+  const OutData = Out.Data;
+  for (let I = 0; I < Size; I++) OutData[I] = AData[I] + BData[I];
 
   if (Tape.On) {
     Out.BackwardFn = () => {
-      for (let I = 0; I < A.Size; I++) {
-        A.Grad[I] += Out.Grad[I];
-        B.Grad[I] += Out.Grad[I];
+      const OutGrad = Out.Grad;
+      const AGrad = A.Grad;
+      const BGrad = B.Grad;
+      for (let I = 0; I < Size; I++) {
+        AGrad[I] += OutGrad[I];
+        BGrad[I] += OutGrad[I];
       }
     };
   }

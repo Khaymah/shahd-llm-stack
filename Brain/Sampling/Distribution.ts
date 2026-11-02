@@ -29,7 +29,8 @@ export function ArgmaxOf(Logits: NumArray, Offset: number, VocabSize: number): n
   return Best;
 }
 
-/** Temperature-scaled softmax with top-k then top-p, renormalized over the kept set. Temperature<=0
+/** Temperature-scaled softmax, then top-k, then top-p over the renormalized top-k set (see the ORDER
+ *  note below), renormalized over what is finally kept. Temperature<=0
  *  returns a one-hot distribution at the argmax (so every consumer gets the documented greedy). */
 export function ProbsFromLogits(Logits: NumArray, Offset: number, VocabSize: number, Options: SamplingOptions): Float64Array {
   if (Options.Temperature <= 0) {
@@ -57,17 +58,25 @@ export function ProbsFromLogits(Logits: NumArray, Offset: number, VocabSize: num
   // skip the O(V log V) sort + renormalization entirely (Probs already sums to 1). Bit-identical.
   if (Options.TopK <= 0 && Options.TopP >= 1) return Probs;
 
+  // ORDER: top-k first, then top-p measured on the top-k set RENORMALIZED (the HF/llama.cpp
+  // convention). TopP is a fraction of the mass that survived top-k, not of the full vocabulary:
+  // with TopK=2 over probs (0.4, 0.3, ...) and TopP=0.5, the top-1 alone holds 0.4/0.7 ≈ 0.57 of the
+  // kept mass, so only it survives. (Measuring against the un-renormalized 0.4 kept both.)
   let Indices: number[] = [];
   for (let J = 0; J < VocabSize; J++) Indices.push(J);
   Indices.sort((A, B) => Probs[B] - Probs[A]);
   if (Options.TopK > 0 && Options.TopK < Indices.length) Indices = Indices.slice(0, Options.TopK);
   if (Options.TopP < 1) {
+    let TopKMass = 0;
+    for (const Idx of Indices) TopKMass += Probs[Idx];
+    // sum(kept)/TopKMass >= TopP, compared as sum(kept) >= TopP*TopKMass (no per-step division).
+    const Threshold = Options.TopP * TopKMass;
     const Kept: number[] = [];
     let Cumulative = 0;
     for (const Idx of Indices) {
       Kept.push(Idx);
       Cumulative += Probs[Idx];
-      if (Cumulative >= Options.TopP) break;
+      if (Cumulative >= Threshold) break;
     }
     Indices = Kept;
   }

@@ -7,14 +7,18 @@ export function Transpose(X: Tensor): Tensor {
   const M = X.Rows;
   const N = X.Cols;
   const Out = new Tensor(N, M, undefined, [X]);
+  const XData = X.Data;
+  const OutData = Out.Data;
   for (let I = 0; I < M; I++) {
-    for (let J = 0; J < N; J++) Out.Data[J * M + I] = X.Data[I * N + J];
+    for (let J = 0; J < N; J++) OutData[J * M + I] = XData[I * N + J];
   }
 
   if (Tape.On) {
     Out.BackwardFn = () => {
+      const XGrad = X.Grad;
+      const OutGrad = Out.Grad;
       for (let I = 0; I < M; I++) {
-        for (let J = 0; J < N; J++) X.Grad[I * N + J] += Out.Grad[J * M + I];
+        for (let J = 0; J < N; J++) XGrad[I * N + J] += OutGrad[J * M + I];
       }
     };
   }

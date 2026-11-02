@@ -4,13 +4,19 @@ import { Tensor } from "../Tensor/Tensor.ts";
 import { Tape } from "../Tensor/Tape.ts";
 
 export function ReLU(X: Tensor): Tensor {
+  const Size = X.Size;
   const Out = new Tensor(X.Rows, X.Cols, undefined, [X]);
-  for (let I = 0; I < X.Size; I++) Out.Data[I] = X.Data[I] > 0 ? X.Data[I] : 0;
+  const XData = X.Data;
+  const OutData = Out.Data;
+  for (let I = 0; I < Size; I++) OutData[I] = XData[I] > 0 ? XData[I] : 0;
 
   if (Tape.On) {
     Out.BackwardFn = () => {
-      for (let I = 0; I < X.Size; I++) {
-        if (X.Data[I] > 0) X.Grad[I] += Out.Grad[I];
+      const XIn = X.Data;
+      const XGrad = X.Grad;
+      const OutGrad = Out.Grad;
+      for (let I = 0; I < Size; I++) {
+        if (XIn[I] > 0) XGrad[I] += OutGrad[I];
       }
     };
   }

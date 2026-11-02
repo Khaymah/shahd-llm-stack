@@ -8,6 +8,8 @@ export function EmbeddingLookup(Table: Tensor, Ids: number[]): Tensor {
   const T = Ids.length;
   const C = Table.Cols;
   const Out = new Tensor(T, C, undefined, [Table]);
+  const TableData = Table.Data;
+  const OutData = Out.Data;
   for (let I = 0; I < T; I++) {
     const Row = Ids[I];
     // Validate before indexing: an out-of-range id would read past the backing Float64Array (undefined
@@ -16,14 +18,16 @@ export function EmbeddingLookup(Table: Tensor, Ids: number[]): Tensor {
     if (Row < 0 || Row >= Table.Rows || !Number.isInteger(Row)) {
       throw new Error(`EmbeddingLookup: id ${Row} at position ${I} out of range [0,${Table.Rows}) — likely a tokenizer/vocab mismatch`);
     }
-    for (let J = 0; J < C; J++) Out.Data[I * C + J] = Table.Data[Row * C + J];
+    for (let J = 0; J < C; J++) OutData[I * C + J] = TableData[Row * C + J];
   }
 
   if (Tape.On) {
     Out.BackwardFn = () => {
+      const OutGrad = Out.Grad;
+      const TableGrad = Table.Grad;
       for (let I = 0; I < T; I++) {
         const Row = Ids[I];
-        for (let J = 0; J < C; J++) Table.Grad[Row * C + J] += Out.Grad[I * C + J];
+        for (let J = 0; J < C; J++) TableGrad[Row * C + J] += OutGrad[I * C + J];
       }
     };
   }
