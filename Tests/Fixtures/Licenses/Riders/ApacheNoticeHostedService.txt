@@ -1,0 +1,38 @@
+Copyright 2019 Atlassian Pty Ltd
+Copyright (c) 2019-2024 Foo Inc. and contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+ADDITIONAL CONDITIONS
+
+Notwithstanding the foregoing, you may not offer the Software, or any
+derivative of it, to third parties as a hosted or managed service, whether
+on a subscription basis, a pay-per-use basis or free of charge, where the
+service provides users with access to any substantial set of the features or
+functionality of the Software. You may not use the Software or any part of it
+in a commercial product or a commercial offering, internal or external,
+without first purchasing a paid license from the Licensor. Commercial use
+means any use by or on behalf of a for-profit entity, including evaluation,
+development, testing, staging and production deployments, and any use from
+which revenue is derived directly or indirectly. You may not remove, disable
+or circumvent any license key functionality, usage metering, or any other
+technical measure in the Software that enforces these limitations. You may
+not move, change, or obscure any licensing, copyright, or other notices of
+the Licensor in the Software. Any use of the Licensor's trademarks is subject
+to applicable law. These conditions apply to all versions of the Software
+released after the date on which this notice was first published and remain
+in effect for every derivative work, fork or redistribution of the Software,
+regardless of the license that would otherwise apply to it. If you are unsure
+whether your intended use is permitted, contact the Licensor to obtain a paid
+license before any deployment. Violation of these conditions automatically
+terminates every right granted to you under the License above.

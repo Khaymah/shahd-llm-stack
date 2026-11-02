@@ -13,6 +13,7 @@ import { FetchRepoFiles } from "./RepoArchive.ts";
 import { AssessRepo, LevelRank, EmptyAssessment } from "./RepoQuality.ts";
 import type { RepoLevel, RepoIngestInfo } from "./RepoQuality.ts";
 import { LangForPath } from "./CodeFileFilter.ts";
+import { ResolveFileLicense } from "./FileLicenseHeader.ts";
 
 type RepoItem = { full_name: string; default_branch: string; license: { spdx_id: string } | null };
 type SearchResult = { items?: RepoItem[] };
@@ -144,14 +145,22 @@ export function CreateGitHubRepoProvider(Options: GitHubRepoOptions = {}): WebPr
             const StoreLicense = License === "NOASSERTION" || License === "unknown" ? await ResolvePermissiveLicense(Repo.full_name, License, FetchLicense, Log) : License;
             Log(`[gh] ${Repo.full_name}: level=${Assessment.Level} files=${Assessment.FileCount} bytes=${Assessment.TotalBytes} -> ingest (license ${StoreLicense})`);
             Options.OnRepo?.({ Repo: Repo.full_name, License: StoreLicense, Assessment, Ingested: true });
-            const Inputs: SourceInput[] = Files.map((File) => ({
-              Source: Repo.full_name,
-              License: StoreLicense,
-              Lang: LangForPath(File.Path),
-              Content: File.Content,
-              Provenance: `https://github.com/${Repo.full_name}/blob/${Repo.default_branch}/${File.Path}`,
-              Origin: "web-permissive",
-            }));
+            // Per-file license: a copyleft/non-permissive header overrides the repo license (-> Rejected
+            // with file_license_conflict); a differing permissive SPDX header becomes the file's license.
+            let Conflicts = 0;
+            const Inputs: SourceInput[] = Files.map((File) => {
+              const Decision = ResolveFileLicense(StoreLicense, File.Header);
+              if (Decision.Conflict) Conflicts++;
+              return {
+                Source: Repo.full_name,
+                License: Decision.License,
+                Lang: LangForPath(File.Path),
+                Content: File.Content,
+                Provenance: `https://github.com/${Repo.full_name}/blob/${Repo.default_branch}/${File.Path}`,
+                Origin: "web-permissive",
+              };
+            });
+            if (Conflicts > 0) Log(`[gh] ${Repo.full_name}: ${Conflicts} file(s) with a conflicting license header -> rejected (file_license_conflict)`);
             // Incremental: store this repo NOW (before downloading the next). Batch: collect for the caller.
             if (Options.OnRepoReady !== undefined) await Options.OnRepoReady(Repo.full_name, Inputs);
             else Out.push(...Inputs);

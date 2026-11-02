@@ -9,11 +9,11 @@ import { join, relative, basename } from "node:path";
 import type { WebProvider, RepoSink } from "./WebSource.ts";
 import type { SourceInput } from "./Ingest.ts";
 import type { RepoFile } from "./RepoArchive.ts";
-import { DefaultRepoLimits } from "./RepoArchive.ts";
+import { DefaultRepoLimits, PrepareRepoFile } from "./RepoArchive.ts";
 import { AssessRepo, LevelRank, EmptyAssessment } from "./RepoQuality.ts";
 import type { RepoLevel, RepoIngestInfo } from "./RepoQuality.ts";
-import { IsSubstantiveCodePath, IsSubstantiveCodeContent, LangForPath } from "./CodeFileFilter.ts";
-import { StripLicenseHeader } from "./ContentNormalizer.ts";
+import { IsSubstantiveCodePath, LangForPath } from "./CodeFileFilter.ts";
+import { ResolveFileLicense } from "./FileLicenseHeader.ts";
 
 function WalkRepo(Root: string, MaxFiles: number, MaxBytes: number, MaxContentBytes: number): RepoFile[] {
   const Out: RepoFile[] = [];
@@ -35,15 +35,16 @@ function WalkRepo(Root: string, MaxFiles: number, MaxBytes: number, MaxContentBy
       } else if (Entry.isFile()) {
         const Rel = relative(Root, Full).split("\\").join("/"); // normalize Windows separators
         if (!IsSubstantiveCodePath(Rel)) continue;
-        let Content: string;
+        let Raw: string;
         try {
-          Content = StripLicenseHeader(readFileSync(Full, "utf8"));
+          Raw = readFileSync(Full, "utf8");
         } catch {
           continue;
         }
-        if (!IsSubstantiveCodeContent(Content, MaxContentBytes)) continue;
-        Out.push({ Path: Rel, Content });
-        Bytes += Content.length;
+        const File = PrepareRepoFile(Rel, Raw, MaxContentBytes); // license header read before stripping
+        if (File === null) continue;
+        Out.push(File);
+        Bytes += File.Content.length;
       }
     }
   };
@@ -87,14 +88,19 @@ export function CreateLocalRepoProvider(Options: LocalRepoOptions): WebProvider 
         const Ingested = LevelRank[Assessment.Level] >= LevelRank[MinLevel];
         Options.OnRepo?.({ Repo: Name, License, Assessment, Ingested });
         if (!Ingested) continue;
-        const Inputs: SourceInput[] = Files.map((File) => ({
-          Source: Name,
-          License,
-          Lang: LangForPath(File.Path),
-          Content: File.Content,
-          Provenance: `${Root}/${File.Path}`,
-          Origin: "owned",
-        }));
+        // A file whose own header is copyleft/non-permissive is third-party code vendored into our repo,
+        // not "owned": it is tagged "local" so tiering applies the license gate and rejects it.
+        const Inputs: SourceInput[] = Files.map((File) => {
+          const Decision = ResolveFileLicense(License, File.Header);
+          return {
+            Source: Name,
+            License: Decision.License,
+            Lang: LangForPath(File.Path),
+            Content: File.Content,
+            Provenance: `${Root}/${File.Path}`,
+            Origin: Decision.Conflict ? "local" : "owned",
+          };
+        });
         // Incremental: store this repo NOW. Batch: collect for the caller.
         if (Options.OnRepoReady !== undefined) await Options.OnRepoReady(Name, Inputs);
         else Out.push(...Inputs);

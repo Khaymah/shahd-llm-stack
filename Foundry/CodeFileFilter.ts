@@ -23,9 +23,13 @@ const LangByExtension: Record<string, string> = {
   scss: "scss", sass: "sass", less: "less", styl: "stylus", vue: "vue", svelte: "svelte", astro: "astro",
 };
 
-// A path segment that means "not substantive product source".
+// A path segment that means "not substantive product source". Compared lowercased, so entries are
+// lowercase ("pods" = CocoaPods' Pods/, "carthage" = Carthage/). Vendored / third-party directories
+// matter for licensing too: their code is under ITS OWN license, not the repo's. Dot-dirs (".yarn",
+// ".git" …) are excluded separately by the leading-"." rule in IsSubstantiveCodePath.
 const ExcludeSegment = new Set([
-  "node_modules", "dist", "build", "out", "bin", "obj", "target", "vendor", "third_party", "deps",
+  "node_modules", "bower_components", "dist", "build", "out", "bin", "obj", "target", "vendor", "third_party",
+  "third-party", "thirdparty", "3rdparty", "external", "extern", "contrib", "pods", "carthage", "deps",
   "coverage", "__tests__", "__mocks__", "__snapshots__", "__pycache__", "test", "tests", "spec", "specs",
   "e2e", "example", "examples", "sample", "samples", "demo", "demos", "benchmark", "benchmarks", "bench",
   "fixture", "fixtures", "mock", "mocks", "doc", "docs", "website", "site", "generated", "gen", "proto",
