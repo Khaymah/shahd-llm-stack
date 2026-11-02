@@ -1,0 +1,13 @@
+{
+  "name": "corner-shop",
+  "version": "1.4.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/api.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -27,6 +27,8 @@ import { SftForwardBackward } from "../Brain/Sft/SftStep.ts";
 import { RenderForTraining, RenderChat } from "../Brain/Sft/ChatTemplate.ts";
 import type { TrainingSequence } from "../Brain/Sft/ChatTemplate.ts";
 import { BuildOwnedConversations, OwnedSystemPrompt } from "../Brain/Sft/OwnedSftData.ts";
+import { ReadStoredConversations } from "../Brain/Sft/StoredConversations.ts";
+import { DefaultToolRegistry } from "../Brain/Serving/Tools/BuildRegistry.ts";
 import type { CodeSample } from "../Brain/Sft/OwnedSftData.ts";
 import { Generate } from "../Brain/Sampling/Generate.ts";
 import { DefaultSampling } from "../Brain/Sampling/Sampler.ts";
@@ -101,26 +103,22 @@ const Samples: CodeSample[] = CodeDocs.map((D) => ({ Lang: D.Lang, Content: D.Co
 const Rng = CreateRngStreams(1234);
 const Conversations = BuildOwnedConversations(Samples, Rng.DataRng, { ArithmeticCount, ThinkingCount, PersonaRepeats: 25, MaxCodeConversations: CodeConvs, MultiTurnCount: MultiTurn });
 
-// Parse each collected conversation doc ("User: …\n\nAssistant: …") into an SFT example so the chat
-// model learns from real dialogue — the link that makes "collect conversation data -> the model talks".
-// Same UNIFIED system prompt as the owned mix: a third near-identical wording ("helpful assistant")
-// would split a tiny model's behavior across prompts — the exact failure class of the typescript
-// incident. Real dialogue carries NO synthetic <|think|> span (we don't fabricate reasoning for text
-// we didn't author); the owned mix supplies the thinking distribution.
-let AddedGeneral = 0;
-for (const Doc of ConvDocs) {
-  const Match = /^User: ([\s\S]*?)\n\nAssistant: ([\s\S]*)$/.exec(Doc.Content);
-  if (Match === null) continue;
-  Conversations.push([{ Role: "System", Content: OwnedSystemPrompt }, { Role: "User", Content: Match[1]! }, { Role: "Assistant", Content: Match[2]! }]);
-  AddedGeneral++;
-}
+// Parse each collected conversation doc into an SFT example so the chat model learns from real dialogue
+// — the link that makes "collect conversation data -> the model talks". Two stored shapes
+// (Brain/Sft/StoredConversations.ts): legacy "User: …\n\nAssistant: …" dialogue, which carries NO
+// fabricated <|think|> span, and shahd-chat-v1 documents (synthetic teacher conversations with thinking +
+// tool steps, Scripts/SynthesizeSft.ts), validated structurally before use. Same UNIFIED system prompt as
+// the owned mix: a third near-identical wording would split a tiny model's behavior across prompts.
+const StoredRead = ReadStoredConversations(ConvDocs.map((D) => D.Content), OwnedSystemPrompt, new Set(DefaultToolRegistry().List().map((T) => T.Name)));
+Conversations.push(...StoredRead.Conversations);
+const AddedGeneral = StoredRead.Tally.Legacy;
 await Stores.Close();
 // Eval decontamination: drop every conversation (owned or collected) sharing a 13-gram with the fixed
 // eval suite or the coding problem set, BEFORE the tokenizer is trained or anything is rendered.
 const Decon = Decontaminate(Conversations.map((C) => C.map((M) => M.Content).join("\n")), TrainingDecontaminationDocs());
 for (const Index of [...Decon.Removed].reverse()) Conversations.splice(Index, 1);
 console.log(`decontamination: removed ${Decon.Removed.length} conversations overlapping the eval suite`);
-console.log(`sft: ${Conversations.length} conversations (${CodeDocs.length} code samples + ${AddedGeneral} real dialogues from documents_conversation)`);
+console.log(`sft: ${Conversations.length} conversations (${CodeDocs.length} code samples + ${AddedGeneral} real dialogues + ${StoredRead.Tally.Chat} shahd-chat-v1 conversations from documents_conversation; ${StoredRead.Tally.Skipped} unreadable/invalid skipped)`);
 
 // RESUME/EXTEND: continue an existing chat checkpoint of this name — reuse its EXACT tokenizer (merges
 // + specials), weights, optimizer, and RNG — instead of retraining fresh. Auto on a same-name/same-

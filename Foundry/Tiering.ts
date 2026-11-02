@@ -6,6 +6,9 @@
 //   low educational value -> Rejected (code only, Plan §2.2 layer 3; the two features that pulled the
 //                    score down the most are the reason).
 //   otherwise      -> Filtered (permissive + clean, eligible for training).
+// Synthetic conversations (Origin "synthetic") take their own path, ClassifySynthetic: the content must
+// be a shahd-chat-v1 document, the License "<source SPDX>;teacher:<model>" with an accepted SOURCE
+// (Foundry/SyntheticLicense.ts), and the rendered conversation is quality-scored as PROSE.
 //
 // The educational score applies to CODE: a document whose Lang is a source-code language (see
 // IsCodeLang), whose origin is not curated prose, and that is at least the structural size window's
@@ -26,6 +29,8 @@ import { ActiveEduWeights, ScoreEducational, TopNegativeContributions } from "..
 import type { EduWeights } from "../Brain/Data/EducationalScore.ts";
 import { DefaultFileFilter, IsCodeLang } from "./CodeFileFilter.ts";
 import type { Tier, Origin } from "./DocumentRecord.ts";
+import { ChatDocumentText, DecodeChatDocument } from "../Brain/Sft/ChatDocument.ts";
+import { IsAcceptedSyntheticSource, ParseSyntheticLicense } from "./SyntheticLicense.ts";
 
 export type TierDecision = { Tier: Tier; QualityScore: number; RejectReason: string | null };
 
@@ -59,7 +64,20 @@ function JudgeQuality(Content: string, Origin: Origin, Options: ClassifyOptions)
   return { Score: Edu.Score, RejectReason: `low educational value: ${Named} (score ${Edu.Score.toFixed(2)} < ${Weights.Threshold})` };
 }
 
+/** The tier of a synthetic conversation (see the header). Malformed content scores 0. */
+function ClassifySynthetic(License: string, Content: string): TierDecision {
+  const Doc = DecodeChatDocument(Content);
+  if (Doc === null) return { Tier: "Rejected", QualityScore: 0, RejectReason: "malformed synthetic conversation (not a shahd-chat-v1 document)" };
+  const Quality = ScoreTextQuality(ChatDocumentText(Doc));
+  const Parsed = ParseSyntheticLicense(License);
+  if (Parsed === null) return { Tier: "Rejected", QualityScore: Quality.Score, RejectReason: `synthetic license must be "<source>;teacher:<model>", got ${License}` };
+  if (!IsAcceptedSyntheticSource(Parsed.Source)) return { Tier: "Rejected", QualityScore: Quality.Score, RejectReason: `non-permissive source license: ${Parsed.Source}` };
+  if (!Quality.Passed) return { Tier: "Rejected", QualityScore: Quality.Score, RejectReason: `low quality: ${Quality.Reasons.join("; ")}` };
+  return { Tier: "Filtered", QualityScore: Quality.Score, RejectReason: null };
+}
+
 export function ClassifyDocument(License: string, Content: string, Origin: Origin, Options: ClassifyOptions = {}): TierDecision {
+  if (Origin === "synthetic") return ClassifySynthetic(License, Content);
   const Quality = JudgeQuality(Content, Origin, Options);
   if (Origin === "web-general") {
     return { Tier: "Raw", QualityScore: Quality.Score, RejectReason: "general web: isolated for inspection, not training-eligible" };

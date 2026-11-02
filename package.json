@@ -26,6 +26,9 @@
     "foundry:ingest-repos": "bun run Scripts/IngestOwnRepos.ts",
     "foundry:train-edu": "bun run Scripts/TrainEduClassifier.ts",
     "foundry:ingest-spec": "bun run Scripts/IngestSpec.ts",
+    "sft:synthesize": "bun run Scripts/SynthesizeSft.ts",
+    "sft:import": "bun run Scripts/ImportSft.ts",
+    "sft:merge": "bun run Scripts/MergeSft.ts",
     "check:length": "bun run Tools/CheckFileLength.ts",
     "check:naming": "bun run Tools/CheckNamingConvention.ts",
     "ci": "bun run typecheck && bun run check:length && bun run check:naming && bun run lint && bun run gradcheck && bun test"

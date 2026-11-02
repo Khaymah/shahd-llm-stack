@@ -36,6 +36,9 @@ on:
       name:
         description: "Override: model name (empty = profile)"
         default: ""
+      synthetic_run_id:
+        description: "Run id of a 'Synthesize SFT' run whose SyntheticSft artifact is imported before SFT (empty = profile's SyntheticRunId, or none)"
+        default: ""
   push:
     tags: ["model-v*", "model-*-v*"] # also publishes a GitHub Release
     branches: ["model/**"] # trains and uploads the artifact only
@@ -54,6 +57,7 @@ jobs:
     timeout-minutes: 355
     permissions:
       contents: write # release upload on model tags
+      actions: read # download the SyntheticSft artifact from another run
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -78,6 +82,7 @@ jobs:
           IN_LAYERS: ${{ github.event.inputs.layers }}
           IN_SFT: ${{ github.event.inputs.sft_steps }}
           IN_NAME: ${{ github.event.inputs.name }}
+          IN_SYNTH: ${{ github.event.inputs.synthetic_run_id }}
         run: |
           PROFILE="$IN_PROFILE"
           if [ -z "$PROFILE" ]; then
@@ -102,6 +107,8 @@ jobs:
             echo "LAYERS=${IN_LAYERS:-$(pick Layers)}"
             echo "SFT_STEPS=${IN_SFT:-$(pick SftSteps)}"
             echo "MODEL_NAME=${IN_NAME:-$(pick Name)}"
+            SYNTH="${IN_SYNTH:-$(jq -r '.SyntheticRunId // ""' "$P")}"
+            echo "SYNTHETIC_RUN_ID=$SYNTH"
           } >> "$GITHUB_ENV"
           echo "profile: $P"; cat "$P"
 
@@ -127,6 +134,19 @@ jobs:
           bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC
           bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status
 
+      - name: Download the SyntheticSft artifact (when a synthesis run is given)
+        if: env.SYNTHETIC_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: SyntheticSft
+          path: Runs/SyntheticSft
+          run-id: ${{ env.SYNTHETIC_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import the synthetic conversations into documents_conversation
+        if: env.SYNTHETIC_RUN_ID != ''
+        run: bun run sft:import Runs/SyntheticSft/SyntheticSft.jsonl
+
       - name: Train the tokenizer from the spec mix
         run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=$TOKENIZER_VERSION --Force
 
@@ -146,7 +166,8 @@ jobs:
           bun run Scripts/TrainSftChat.ts --From=${MODEL_NAME}Base --Name=$MODEL_NAME \
             --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.$TOKENIZER_VERSION.json --Steps=$SFT_STEPS \
             --EmbedDim=$EMBED --Layers=$LAYERS --Heads=$HEADS --Batch=8 --Workers=4 --Precision=F32 \
-            --CodeSamples=600 --Arithmetic=600 --Thinking=300 --CodeConvs=300 --MultiTurn=600
+            --CodeSamples=600 --Arithmetic=600 --Thinking=300 --CodeConvs=300 --MultiTurn=600 \
+            --ConvCount=20000
 
       - name: Evaluate (results stored in the checkpoint's Meta.Eval)
         run: |
@@ -164,6 +185,7 @@ jobs:
             echo
             echo "Trained by the train-model workflow (run ${{ github.run_id }}, commit ${{ github.sha }})."
             echo "Profile: $PROFILE · spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · heads $HEADS · pretrain epochs $EPOCHS · SFT steps $SFT_STEPS."
+            echo "Synthetic SFT: ${SYNTHETIC_RUN_ID:-none} (run id of the Synthesize SFT workflow)."
             echo
             echo '```bash'
             echo "bun run serve --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # OpenAI-compatible on 127.0.0.1:8080"

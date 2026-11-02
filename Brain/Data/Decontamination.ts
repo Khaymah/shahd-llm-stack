@@ -22,24 +22,35 @@ function WordNgrams(Text: string, N: number): Set<string> {
 
 export type DecontaminationResult = { Kept: number[]; Removed: number[] };
 
-/** Remove train docs sharing any N-word n-gram with the eval set. */
-export function Decontaminate(TrainDocs: string[], EvalDocs: string[], NgramSize = 13): DecontaminationResult {
-  const EvalNgrams = new Set<string>();
-  for (const Doc of EvalDocs) {
-    for (const Gram of WordNgrams(Doc, NgramSize)) EvalNgrams.add(Gram);
+/** The eval set's N-word n-grams, built ONCE and queried per training document — for streaming callers
+ *  (the SFT synthesizer judges one conversation at a time) that must not rebuild the index per doc. */
+export class EvalNgramIndex {
+  private readonly Ngrams = new Set<string>();
+  private readonly NgramSize: number;
+
+  constructor(EvalDocs: readonly string[], NgramSize = 13) {
+    this.NgramSize = NgramSize;
+    for (const Doc of EvalDocs) {
+      for (const Gram of WordNgrams(Doc, NgramSize)) this.Ngrams.add(Gram);
+    }
   }
 
+  /** True when Doc shares any N-word n-gram with the eval set. */
+  Contaminates(Doc: string): boolean {
+    for (const Gram of WordNgrams(Doc, this.NgramSize)) {
+      if (this.Ngrams.has(Gram)) return true;
+    }
+    return false;
+  }
+}
+
+/** Remove train docs sharing any N-word n-gram with the eval set. */
+export function Decontaminate(TrainDocs: string[], EvalDocs: string[], NgramSize = 13): DecontaminationResult {
+  const Index = new EvalNgramIndex(EvalDocs, NgramSize);
   const Kept: number[] = [];
   const Removed: number[] = [];
   for (let I = 0; I < TrainDocs.length; I++) {
-    let Contaminated = false;
-    for (const Gram of WordNgrams(TrainDocs[I], NgramSize)) {
-      if (EvalNgrams.has(Gram)) {
-        Contaminated = true;
-        break;
-      }
-    }
-    if (Contaminated) Removed.push(I);
+    if (Index.Contaminates(TrainDocs[I])) Removed.push(I);
     else Kept.push(I);
   }
   return { Kept, Removed };

@@ -10,6 +10,7 @@ import { PostgresDocumentStore } from "../Foundry/PostgresDocumentStore.ts";
 import { FoundryStores } from "../Foundry/FoundryStores.ts";
 import { ResolveCheckpointDir } from "../Foundry/PostgresCheckpointStore.ts";
 import { DefaultDataSpecPath } from "../Foundry/DataSpec.ts";
+import { DefaultTeacherUrl } from "../Foundry/TeacherClient.ts";
 import { ReadArg } from "./ScriptArgs.ts";
 
 export function DatabaseUrl(): string {
@@ -28,6 +29,16 @@ export function GitHubToken(): string | undefined {
 
 export function BraveKey(): string | undefined {
   return process.env["BRAVE_API_KEY"];
+}
+
+/** The SFT teacher endpoint (OpenAI-compatible, a LOCAL open-weights model): SHAHD_TEACHER_URL > default. */
+export function TeacherUrl(): string {
+  return process.env["SHAHD_TEACHER_URL"] || DefaultTeacherUrl;
+}
+
+/** The teacher model id recorded in provenance: SHAHD_TEACHER_MODEL, else asked from the server. */
+export function TeacherModel(): string | undefined {
+  return process.env["SHAHD_TEACHER_MODEL"];
 }
 
 /** Store: --Store CLI > FOUNDRY_STORE env > (DATABASE_URL present ? postgres : memory). */
