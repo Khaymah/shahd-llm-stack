@@ -4,7 +4,8 @@
 #   -> eval (Meta.Eval written into the checkpoint) -> artifact.
 # The runner has 4 vCPUs and a 6 h job limit; the CI spec is sized so a run finishes in ~1 h.
 # Note: "Run workflow" (workflow_dispatch) appears only once this file is on the default branch; a
-# `model-v*` tag runs it from any branch (and -rc/-alpha/-beta tags publish a pre-release).
+# `model-v*` tag runs it from any branch (and -rc/-alpha/-beta tags publish a pre-release), and so
+# does a push to a `model/**` branch (artifact only, no release).
 name: Train model
 
 on:
@@ -26,7 +27,8 @@ on:
         description: "Model name (checkpoint + artifact)"
         default: "CiChat"
   push:
-    tags: ["model-v*"]
+    tags: ["model-v*"] # also publishes a GitHub Release
+    branches: ["model/**"] # a `model/<name>` branch trains and uploads the artifact only
 
 concurrency:
   group: train-model-${{ github.ref }}
