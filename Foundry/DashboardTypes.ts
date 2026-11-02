@@ -30,7 +30,22 @@ export type LearnEvent =
   // exhausted vs streaming can grow).
   // collected = this source's LIFETIME new-doc total (collection ledger); exhausted = a bounded source
   // confirmed fully collected (re-running only dedups).
-  | { kind: "done"; ingested: number; new?: number; duplicate?: number; semantics?: "bounded" | "streaming"; collected?: number; exhausted?: boolean }
+  // Terminal event of a learn run - emitted exactly once. `failedDocs` counts documents that failed
+  // to store; `failed` is true when the run was aborted (failure budget, provider error, or an
+  // unexpected runner error) and `message` carries the first cause; `stopped` is true after Stop.
+  | {
+      kind: "done";
+      ingested: number;
+      new?: number;
+      duplicate?: number;
+      failedDocs?: number;
+      semantics?: "bounded" | "streaming";
+      collected?: number;
+      exhausted?: boolean;
+      failed?: boolean;
+      stopped?: boolean;
+      message?: string;
+    }
   | { kind: "error"; message: string };
 
 export type LearnFn = (Settings: LearnSettings, OnEvent: (Event: LearnEvent) => void, Signal?: AbortSignal) => Promise<void>;

@@ -40,7 +40,7 @@ export const ChatHtml = `<!doctype html><html><head><meta charset="utf-8"><meta 
 </style></head><body>
 <div class="app">
  <div class="side">
-  <div class="top"><h1>Shahd — Chat</h1><button class="newb" onclick="newChat()">+ New conversation</button></div>
+  <div class="top"><h1>Shahd — Chat</h1><button class="newb" id="newb">+ New conversation</button></div>
   <div class="list" id="convs"></div>
   <a href="/">← back to Data Foundry</a>
  </div>
@@ -48,7 +48,7 @@ export const ChatHtml = `<!doctype html><html><head><meta charset="utf-8"><meta 
   <div class="bar">
    <span class="dot" id="dot"></span>
    <span class="lbl">Model</span>
-   <select id="modelsel" onchange="pickModel(this.value)"><option value="">(no model)</option></select>
+   <select id="modelsel"><option value="">(no model)</option></select>
    <span class="info" id="minfo"></span>
   </div>
   <div class="warn">⚠ Tiny from-scratch model — replies are <b>experimental and often incoherent</b>. Chat verifies the serving path + reasoning trace (in the server console), not model quality.</div>
@@ -59,7 +59,7 @@ export const ChatHtml = `<!doctype html><html><head><meta charset="utf-8"><meta 
     <label>max tokens <input id="max" type="number" min="1" max="4096" step="1" value="512"></label>
     <span id="stat"></span>
    </div>
-   <div class="in"><textarea id="box" placeholder="Type a message — Enter to send, Shift+Enter for newline"></textarea><button class="send" id="send" onclick="send()">Send</button></div>
+   <div class="in"><textarea id="box" placeholder="Type a message — Enter to send, Shift+Enter for newline"></textarea><button class="send" id="send">Send</button></div>
   </div>
  </div>
 </div>
@@ -88,8 +88,15 @@ export const ChatHtml = `<!doctype html><html><head><meta charset="utf-8"><meta 
 
  async function loadConvs(){
   var list=await (await fetch('/api/chat/conversations')).json();
-  Q('convs').innerHTML=list.map(function(c){return '<div class="conv'+(c.Id===convId?' active':'')+'" onclick="openConv('+JSON.stringify(c.Id).replace(/"/g,'&quot;')+')"><span>'+H(c.Title)+'</span><span class="del" onclick="event.stopPropagation();delConv('+JSON.stringify(c.Id).replace(/"/g,'&quot;')+')">✕</span></div>';}).join('')||'<div style="color:var(--mut);font-size:12px;padding:8px 10px">no conversations yet</div>';
+  // No inline handlers: the id rides in an escaped data-id attribute and one delegated listener on
+  // the list container (wired once below) reads it back as plain text — it is never parsed as code.
+  Q('convs').innerHTML=list.map(function(c){return '<div class="conv'+(c.Id===convId?' active':'')+'" data-id="'+H(c.Id)+'"><span>'+H(c.Title)+'</span><span class="del" data-del="1">✕</span></div>';}).join('')||'<div style="color:var(--mut);font-size:12px;padding:8px 10px">no conversations yet</div>';
  }
+ Q('convs').addEventListener('click',function(e){
+  var row=e.target.closest('.conv');if(!row)return;
+  var id=row.getAttribute('data-id');if(!id)return;
+  if(e.target.closest('.del'))delConv(id);else openConv(id);
+ });
  async function openConv(id){
   if(streaming)return; convId=id;
   var msgs=await (await fetch('/api/chat/conversation?id='+encodeURIComponent(id))).json();
@@ -128,5 +135,14 @@ export const ChatHtml = `<!doctype html><html><head><meta charset="utf-8"><meta 
   };
  }
  Q('box').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
+ Q('newb').addEventListener('click',newChat);
+ Q('send').addEventListener('click',send);
+ Q('modelsel').addEventListener('change',function(){pickModel(this.value);});
  newChat(); connect();
 </script></body></html>`;
+
+/** The chat page with its single inline script tagged by a per-response CSP nonce (the page's CSP
+ *  allows only that script — no inline handlers exist in the markup, so nothing else needs to run). */
+export function RenderChatHtml(Nonce: string): string {
+  return ChatHtml.replace("<script>", '<script nonce="' + Nonce + '">');
+}
