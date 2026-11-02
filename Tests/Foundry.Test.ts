@@ -10,6 +10,7 @@ import {
   RenderReportText,
 } from "../Foundry/FoundryBarrel.ts";
 import type { SourceInput, DocumentRecord } from "../Foundry/FoundryBarrel.ts";
+import { IngestFailureBudget, IngestAbortError, MaxConsecutiveIngestFailures } from "../Foundry/Ingest.ts";
 
 const Clean = "export function add(a, b) {\n  return a + b;\n}\n";
 const GoSnippet = "package main\n\nfunc Max(a, b int) int {\n\tif a > b {\n\t\treturn a\n\t}\n\treturn b\n}\n";
@@ -143,4 +144,70 @@ test("provenance-aware dedup: identical content from different origins coexist (
   expect(await Store.Count()).toBe(2); // the web copy does NOT overwrite the local one
   expect((await Store.ByTier("Filtered")).length).toBe(1); // local MIT stays training-eligible
   expect((await Store.ByTier("Raw")).length).toBe(1); // general web stays isolated
+});
+
+// A store whose Upsert fails for every row the predicate selects (by 0-based call index).
+class SelectiveFailStore extends InMemoryDocumentStore {
+  Calls = 0;
+  private FailWhen: (Call: number) => boolean;
+  constructor(FailWhen: (Call: number) => boolean) {
+    super();
+    this.FailWhen = FailWhen;
+  }
+  override async Upsert(Doc: DocumentRecord): Promise<boolean> {
+    const Call = this.Calls++;
+    if (this.FailWhen(Call)) throw new Error(`simulated failure ${Call}`);
+    return super.Upsert(Doc);
+  }
+}
+const UniqueInputs = (Count: number): SourceInput[] =>
+  Array.from({ length: Count }, (_, I) => ({ Source: "s", License: "MIT", Lang: "ts", Content: `${Clean}// ${I}\n`, Provenance: `f${I}.ts`, Origin: "local" as const }));
+
+test("ingest aborts after MaxConsecutiveIngestFailures in a row, carrying the partial stats", async () => {
+  const Warnings: string[] = [];
+  const Store = new SelectiveFailStore((Call) => Call >= 3); // 3 good rows, then the store is "down"
+  let Failure: unknown = null;
+  try {
+    await IngestDocuments(UniqueInputs(40), Store, "2026-07-13T00:00:00.000Z", 256, undefined, new IngestFailureBudget((M) => Warnings.push(M)));
+  } catch (Caught) {
+    Failure = Caught;
+  }
+  expect(Failure).toBeInstanceOf(IngestAbortError);
+  const Abort = Failure as IngestAbortError;
+  expect(Abort.message).toContain(`${MaxConsecutiveIngestFailures} consecutive`);
+  expect(Abort.Stats.Ingested).toBe(3);
+  expect(Abort.Stats.Failed).toBe(MaxConsecutiveIngestFailures);
+  expect(Store.Calls).toBe(3 + MaxConsecutiveIngestFailures); // stopped right there, no churn
+  expect(Warnings.length).toBe(1); // first failure logged in full; repeats suppressed
+  expect(Warnings[0]).toContain("simulated failure 3");
+});
+
+test("ingest aborts when >20% of >=50 attempts failed, even with no long failure streak", async () => {
+  const Store = new SelectiveFailStore((Call) => Call % 4 === 0); // every 4th row fails: 25%
+  let Failure: unknown = null;
+  try {
+    await IngestDocuments(UniqueInputs(200), Store, "2026-07-13T00:00:00.000Z", 256, undefined, new IngestFailureBudget(() => {}));
+  } catch (Caught) {
+    Failure = Caught;
+  }
+  expect(Failure).toBeInstanceOf(IngestAbortError);
+  expect((Failure as Error).message).toContain("upserts failed");
+  expect(Store.Calls).toBeLessThan(200); // aborted early, at the first check past 50 attempts
+  expect(Store.Calls).toBeGreaterThanOrEqual(50);
+});
+
+test("ingest failure budget is run-wide: failures accumulate across IngestDocuments calls", async () => {
+  const Budget = new IngestFailureBudget(() => {});
+  const Store = new SelectiveFailStore(() => true);
+  // 6 + 6 consecutive failures over two batches trip the 10-in-a-row limit in the SECOND call.
+  const First = await IngestDocuments(UniqueInputs(6), Store, "2026-07-13T00:00:00.000Z", 256, undefined, Budget);
+  expect(First.Failed).toBe(6);
+  let Failure: unknown = null;
+  try {
+    await IngestDocuments(UniqueInputs(6), Store, "2026-07-13T00:00:00.000Z", 256, undefined, Budget);
+  } catch (Caught) {
+    Failure = Caught;
+  }
+  expect(Failure).toBeInstanceOf(IngestAbortError);
+  expect(Budget.Failed).toBe(MaxConsecutiveIngestFailures);
 });

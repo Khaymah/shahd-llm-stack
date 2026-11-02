@@ -26,17 +26,25 @@ export interface CollectionStateStore {
   All(): Promise<CollectionState[]>;
 }
 
+/** The unit a provider's per-run cap (Settings.MaxRepos) counts: GitHub/local repo providers cap
+ *  REPOSITORIES, dataset providers cap DOCUMENTS. Exhaustion must compare like with like. */
+export type CapUnit = "repos" | "documents";
+export type UnitCount = { Count: number; Unit: CapUnit };
+
 /** Whether a run CONFIRMS a bounded source is fully collected: it produced 0 new docs (only duplicates,
- *  so it re-checked existing data) AND ran dry BEFORE the MaxItems cap (Ingested < Cap) rather than being
- *  merely truncated by it. This guard is trust-critical: without `Ingested < Cap`, re-running OASST with a
- *  cap of 2000 (of ~14k) would falsely announce "fully collected" — the exact "you're stuck at this data"
- *  signal the whole data-engine effort set out to eliminate. Streaming sources are never exhausted. */
+ *  so it re-checked existing data) AND ran dry BEFORE the per-run cap (Produced < Cap) rather than being
+ *  merely truncated by it. This guard is trust-critical: without `Produced < Cap`, re-running OASST with
+ *  a cap of 2000 (of ~14k) would falsely announce "fully collected" — the exact "you're stuck at this
+ *  data" signal the whole data-engine effort set out to eliminate. Produced and Cap MUST be in the same
+ *  unit (a repo cap vs. a file count compared nothing meaningful); mismatched units never confirm
+ *  exhaustion. Streaming sources are never exhausted. */
 export function ComputeExhausted(
   Semantics: "bounded" | "streaming" | undefined,
   New: number,
   Duplicate: number,
-  Ingested: number,
-  Cap: number,
+  Produced: UnitCount,
+  Cap: UnitCount,
 ): boolean {
-  return Semantics === "bounded" && New === 0 && Duplicate > 0 && Ingested < Cap;
+  if (Produced.Unit !== Cap.Unit) return false; // cannot confirm across units — never claim "complete"
+  return Semantics === "bounded" && New === 0 && Duplicate > 0 && Produced.Count < Cap.Count;
 }

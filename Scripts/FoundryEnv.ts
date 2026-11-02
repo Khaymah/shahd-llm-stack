@@ -7,10 +7,17 @@ import { InMemoryDocumentStore } from "../Foundry/FoundryBarrel.ts";
 import type { DocumentStore } from "../Foundry/FoundryBarrel.ts";
 import { PostgresDocumentStore } from "../Foundry/PostgresDocumentStore.ts";
 import { FoundryStores } from "../Foundry/FoundryStores.ts";
+import { ResolveCheckpointDir } from "../Foundry/PostgresCheckpointStore.ts";
 import { ReadArg } from "./ScriptArgs.ts";
 
 export function DatabaseUrl(): string {
   return process.env["DATABASE_URL"] ?? "postgres://shahd:shahd@localhost:5432/shahd";
+}
+
+/** Checkpoint payload directory: FOUNDRY_CHECKPOINT_DIR > "Checkpoints". The store writes
+ *  `<dir>/<SafeName>.ckpt` there and keeps only metadata in Postgres (see PostgresCheckpointStore). */
+export function CheckpointDir(): string {
+  return ResolveCheckpointDir();
 }
 
 export function GitHubToken(): string | undefined {
@@ -42,4 +49,20 @@ export function Query(Default: string): string {
 export function RepoRoots(): string[] {
   const Raw = ReadArg("--Repos=", "") || process.env["FOUNDRY_REPOS"] || ".";
   return Raw.split(",").map((S) => S.trim()).filter((S) => S.length > 0);
+}
+
+/** The chat model loaded at startup — the only name allowed the checkpoint-FILE fallback. */
+export function DefaultCheckpointName(): string {
+  return process.env["FOUNDRY_CHECKPOINT_NAME"] ?? "Seed";
+}
+
+/** Checkpoint FILE fallback for the default model: --Checkpoint CLI > FOUNDRY_CHECKPOINT env > default. */
+export function CheckpointFile(): string {
+  return ReadArg("--Checkpoint=", "") || process.env["FOUNDRY_CHECKPOINT"] || "Checkpoints/Foundry.ckpt";
+}
+
+/** Self-consistency samples per chat turn (SHAHD_SELF_CONSISTENCY, default 1 = off). N>1 answers N times
+ *  with different seeds and majority-votes — test-time compute; needs Temperature>0 to diverge. */
+export function SelfConsistencySamples(): number {
+  return Math.max(1, Math.floor(Number(process.env["SHAHD_SELF_CONSISTENCY"] ?? "1")) || 1);
 }
