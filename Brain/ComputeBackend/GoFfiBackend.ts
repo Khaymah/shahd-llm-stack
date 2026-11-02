@@ -24,6 +24,15 @@
 // tolerance on shapes that hit its edge paths — RunGradCheck never activates a backend, so it only
 // ever exercises the inline TS path and does NOT cover this code.
 //
+// SAFETY (two native hazards, both uncatchable from TS once they fire):
+//   1. ISA — the kernels dispatch at load time between AVX2+FMA and a scalar copy (see
+//      GoKernels/ffi/matmul_dispatch.c), and ShahdCpuSupportsAvx2Fma reports which one runs.
+//      CpuSupportsAvx2Fma exposes that to BackendSelector; null means the library predates the
+//      probe (and the dispatcher), i.e. it may SIGILL on a CPU without AVX2/FMA.
+//   2. Memory — every entry validates its buffers first (ValidateMatMulArgs: one element type,
+//      lengths >= the shape's products, nothing empty) so a short or mixed-width buffer throws a
+//      descriptive Error instead of being read/written out of bounds in C.
+//
 // The DLL is opened ONCE per path and kept for the PROCESS LIFETIME — never unloaded. That is a
 // CORRECTNESS requirement, not an optimization: Ops/MatMul captures the active backend inside every
 // tape node's backward closure, so a node built while this backend was active still calls into the
@@ -36,10 +45,12 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import type { Pointer } from "bun:ffi";
 import type { ComputeBackend } from "./ComputeBackend.ts";
 import type { NumArray, NumArrayCtor } from "../Tensor/Tensor.ts";
+import { ValidateMatMulArgs } from "./MatMulArgs.ts";
 
 type MatMulSymbol = (a: Pointer, b: Pointer, out: Pointer, m: number, k: number, n: number) => void;
 type MatMulAccSymbol = (a: Pointer, b: Pointer, out: Pointer, m: number, k: number, n: number, acc: number) => void;
-type ThreadsSymbol = (n: number) => void;
+type IntArgSymbol = (n: number) => void;
+type ProbeSymbol = () => number;
 type KernelSymbols = {
   MatMul: MatMulSymbol;
   Nt: MatMulAccSymbol | null;
@@ -49,8 +60,14 @@ type KernelSymbols = {
   MatMul32: MatMulSymbol | null;
   Nt32: MatMulAccSymbol | null;
   Tn32: MatMulAccSymbol | null;
-  Threads: ThreadsSymbol | null;
+  Threads: IntArgSymbol | null;
+  // CPU-feature probe + scalar-forcing test hook, added together with the ISA dispatcher. Null on
+  // older DLLs — which compile every kernel as AVX2 with no runtime check (SIGILL risk).
+  Probe: ProbeSymbol | null;
+  ForceScalar: IntArgSymbol | null;
 };
+
+const DefaultLibPath = "GoKernels/matmul.dll";
 
 const MatMulDef = {
   args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32],
@@ -60,16 +77,19 @@ const MatMulAccDef = {
   args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32],
   returns: FFIType.void,
 } as const;
-const ThreadsDef = { args: [FFIType.i32], returns: FFIType.void } as const;
+const IntArgDef = { args: [FFIType.i32], returns: FFIType.void } as const;
+const ProbeDef = { args: [], returns: FFIType.i32 } as const;
+
+// Accumulate flag values for the NT/TN kernels (C `int Acc`).
+const Overwrite = 0;
+const Accumulate = 1;
 
 // Strong, process-lifetime refs keyed by library path (see the header for why these are never closed).
 const LoadedLibs = new Map<string, KernelSymbols>();
 
-function LoadKernelSymbols(LibPath: string): KernelSymbols {
-  const Cached = LoadedLibs.get(LibPath);
-  if (Cached !== undefined) return Cached;
+type CoreSymbols = Omit<KernelSymbols, "Probe" | "ForceScalar">;
 
-  let Symbols: KernelSymbols;
+function LoadCoreSymbols(LibPath: string): CoreSymbols {
   try {
     const Lib = dlopen(LibPath, {
       MatMulF64: MatMulDef,
@@ -78,16 +98,16 @@ function LoadKernelSymbols(LibPath: string): KernelSymbols {
       MatMulF32: MatMulDef,
       MatMulNTF32: MatMulAccDef,
       MatMulTNF32: MatMulAccDef,
-      SetKernelThreads: ThreadsDef,
+      SetKernelThreads: IntArgDef,
     });
-    Symbols = {
+    return {
       MatMul: Lib.symbols.MatMulF64 as unknown as MatMulSymbol,
       Nt: Lib.symbols.MatMulNTF64 as unknown as MatMulAccSymbol,
       Tn: Lib.symbols.MatMulTNF64 as unknown as MatMulAccSymbol,
       MatMul32: Lib.symbols.MatMulF32 as unknown as MatMulSymbol,
       Nt32: Lib.symbols.MatMulNTF32 as unknown as MatMulAccSymbol,
       Tn32: Lib.symbols.MatMulTNF32 as unknown as MatMulAccSymbol,
-      Threads: Lib.symbols.SetKernelThreads as unknown as ThreadsSymbol,
+      Threads: Lib.symbols.SetKernelThreads as unknown as IntArgSymbol,
     };
   } catch {
     try {
@@ -96,32 +116,61 @@ function LoadKernelSymbols(LibPath: string): KernelSymbols {
         MatMulF64: MatMulDef,
         MatMulNTF64: MatMulAccDef,
         MatMulTNF64: MatMulAccDef,
-        SetKernelThreads: ThreadsDef,
+        SetKernelThreads: IntArgDef,
       });
-      Symbols = {
+      return {
         MatMul: Lib.symbols.MatMulF64 as unknown as MatMulSymbol,
         Nt: Lib.symbols.MatMulNTF64 as unknown as MatMulAccSymbol,
         Tn: Lib.symbols.MatMulTNF64 as unknown as MatMulAccSymbol,
         MatMul32: null,
         Nt32: null,
         Tn32: null,
-        Threads: Lib.symbols.SetKernelThreads as unknown as ThreadsSymbol,
+        Threads: Lib.symbols.SetKernelThreads as unknown as IntArgSymbol,
       };
     } catch {
       // Oldest DLL without the backward entry points (or the throw is "no such file" — then this
       // dlopen throws too, which is the constructor's absent-DLL signal for TryGoFfi).
       const Lib = dlopen(LibPath, { MatMulF64: MatMulDef });
-      Symbols = { MatMul: Lib.symbols.MatMulF64 as unknown as MatMulSymbol, Nt: null, Tn: null, MatMul32: null, Nt32: null, Tn32: null, Threads: null };
+      return { MatMul: Lib.symbols.MatMulF64 as unknown as MatMulSymbol, Nt: null, Tn: null, MatMul32: null, Nt32: null, Tn32: null, Threads: null };
     }
   }
+}
+
+// The probe lives in its own dlopen so a DLL missing it still loads (with Probe = null) instead of
+// failing the whole core symbol set — absence is information the selector acts on.
+function LoadProbeSymbols(LibPath: string): Pick<KernelSymbols, "Probe" | "ForceScalar"> {
+  try {
+    const Lib = dlopen(LibPath, { ShahdCpuSupportsAvx2Fma: ProbeDef, SetScalarKernels: IntArgDef });
+    return {
+      Probe: Lib.symbols.ShahdCpuSupportsAvx2Fma as unknown as ProbeSymbol,
+      ForceScalar: Lib.symbols.SetScalarKernels as unknown as IntArgSymbol,
+    };
+  } catch {
+    return { Probe: null, ForceScalar: null };
+  }
+}
+
+function LoadKernelSymbols(LibPath: string): KernelSymbols {
+  const Cached = LoadedLibs.get(LibPath);
+  if (Cached !== undefined) return Cached;
+  const Symbols: KernelSymbols = { ...LoadCoreSymbols(LibPath), ...LoadProbeSymbols(LibPath) };
   LoadedLibs.set(LibPath, Symbols);
   return Symbols;
 }
 
+// bun:ffi's ptr() does not throw on a zero-length view in every version — it can hand back an Error
+// object instead of a number, which would then be passed to C as a "pointer". ValidateMatMulArgs
+// already rejects empty buffers; this is the last line of defense for anything it did not foresee.
 function BufPtr(Buf: NumArray): Pointer {
-  const P = ptr(Buf);
-  if (P === null) throw new Error("GoFfiBackend: null buffer pointer");
-  return P;
+  const P: unknown = ptr(Buf);
+  if (typeof P !== "number" || P === 0) {
+    throw new Error(`GoFfiBackend: could not take a native pointer to a ${Buf.length}-element buffer`);
+  }
+  return P as Pointer;
+}
+
+function Rebuild(What: string): Error {
+  return new Error(`GoFfiBackend: DLL lacks the ${What} — rebuild GoKernels (cd GoKernels/ffi && go build -buildmode=c-shared -o ../matmul.dll ./)`);
 }
 
 export class GoFfiBackend implements ComputeBackend {
@@ -130,9 +179,15 @@ export class GoFfiBackend implements ComputeBackend {
   /** True when the DLL exports the f32 kernel trio — BackendSelector requires this for F32 runs. */
   readonly HasF32: boolean;
 
+  /** true: AVX2+FMA kernels run. false: this CPU only gets the scalar fallback. null: the library
+   *  predates the CPU probe — its kernels are AVX2-only with no runtime check, so calling them on a
+   *  CPU without AVX2/FMA is a SIGILL. BackendSelector only activates this backend on `true`. */
+  readonly CpuSupportsAvx2Fma: boolean | null;
+
   // Optional ComputeBackend capabilities — only assigned when the DLL exports the new symbols, so
   // `Backend.MatMulNtAcc === undefined` remains an honest feature probe for Ops/MatMul.
   MatMulNtAcc?: (A: NumArray, Bt: NumArray, Out: NumArray, M: number, K: number, N: number) => void;
+  MatMulNtInto?: (A: NumArray, Bt: NumArray, Out: NumArray, M: number, K: number, N: number) => void;
   MatMulTnAcc?: (A: NumArray, DOut: NumArray, Db: NumArray, M: number, K: number, N: number) => void;
 
   /** PROCESS-GLOBAL cap on per-call goroutine fan-out (one Go runtime serves every JS thread).
@@ -140,28 +195,39 @@ export class GoFfiBackend implements ComputeBackend {
    *  and 0 restores the all-cores default. Only defined when the DLL exports the symbol. */
   SetKernelThreads?: (N: number) => void;
 
-  constructor(LibPath = "GoKernels/matmul.dll") {
+  /** PROCESS-GLOBAL test hook: true forces the scalar kernels, false restores CPU-based dispatch
+   *  (never enables AVX on a CPU without it). Only defined when the DLL has the ISA dispatcher. */
+  SetScalarKernels?: (Force: boolean) => void;
+
+  constructor(LibPath = DefaultLibPath) {
     this.Symbols = LoadKernelSymbols(LibPath); // throws when the DLL is absent — TryGoFfi probes with this
-    const { Nt, Tn, Nt32, Tn32, Threads } = this.Symbols;
+    const { Nt, Tn, Nt32, Tn32, Threads, Probe, ForceScalar } = this.Symbols;
     this.HasF32 = this.Symbols.MatMul32 !== null;
+    this.CpuSupportsAvx2Fma = Probe === null ? null : Probe() !== 0; // the probe itself is scalar C — safe anywhere
     if (Nt !== null) {
-      // Dispatch by element type per call: every buffer of one call shares one width (the run's
-      // precision), so probing the FIRST operand is sufficient and costs one instanceof.
-      this.MatMulNtAcc = (A, Bt, Out, M, K, N) => {
+      // Dispatch by element type per call; ValidateMatMulArgs guarantees every buffer shares it.
+      const RunNt = (A: NumArray, Bt: NumArray, Out: NumArray, M: number, K: number, N: number, Acc: number, Op: string): void => {
+        ValidateMatMulArgs(Op, A, Bt, Out, M, K, N, "NT");
         const Fn = A instanceof Float32Array ? Nt32 : Nt;
-        if (Fn === null) throw new Error("GoFfiBackend: DLL lacks the f32 NT kernel — rebuild GoKernels");
-        Fn(BufPtr(A), BufPtr(Bt), BufPtr(Out), M, K, N, 1);
+        if (Fn === null) throw Rebuild("f32 NT kernel");
+        Fn(BufPtr(A), BufPtr(Bt), BufPtr(Out), M, K, N, Acc);
       };
+      this.MatMulNtAcc = (A, Bt, Out, M, K, N) => RunNt(A, Bt, Out, M, K, N, Accumulate, "GoFfiBackend.MatMulNtAcc");
+      this.MatMulNtInto = (A, Bt, Out, M, K, N) => RunNt(A, Bt, Out, M, K, N, Overwrite, "GoFfiBackend.MatMulNtInto");
     }
     if (Tn !== null) {
       this.MatMulTnAcc = (A, DOut, Db, M, K, N) => {
+        ValidateMatMulArgs("GoFfiBackend.MatMulTnAcc", A, DOut, Db, M, K, N, "TN");
         const Fn = A instanceof Float32Array ? Tn32 : Tn;
-        if (Fn === null) throw new Error("GoFfiBackend: DLL lacks the f32 TN kernel — rebuild GoKernels");
-        Fn(BufPtr(A), BufPtr(DOut), BufPtr(Db), M, K, N, 1);
+        if (Fn === null) throw Rebuild("f32 TN kernel");
+        Fn(BufPtr(A), BufPtr(DOut), BufPtr(Db), M, K, N, Accumulate);
       };
     }
     if (Threads !== null) {
       this.SetKernelThreads = (N) => Threads(N);
+    }
+    if (ForceScalar !== null) {
+      this.SetScalarKernels = (Force) => ForceScalar(Force ? 1 : 0);
     }
   }
 
@@ -172,8 +238,9 @@ export class GoFfiBackend implements ComputeBackend {
   }
 
   MatMulInto(A: NumArray, B: NumArray, Out: NumArray, M: number, K: number, N: number): void {
+    ValidateMatMulArgs("GoFfiBackend.MatMulInto", A, B, Out, M, K, N, "NN");
     const Fn = A instanceof Float32Array ? this.Symbols.MatMul32 : this.Symbols.MatMul;
-    if (Fn === null) throw new Error("GoFfiBackend: DLL lacks the f32 forward kernel — rebuild GoKernels");
+    if (Fn === null) throw Rebuild("f32 forward kernel");
     Fn(BufPtr(A), BufPtr(B), BufPtr(Out), M, K, N); // kernel fully overwrites Out
   }
 }
