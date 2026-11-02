@@ -131,19 +131,101 @@ test("ReclassifyBySource promotes quality NOASSERTION docs to Filtered, keeps lo
   expect(String(StillRejected?.RejectReason)).toContain("low quality");
 });
 
-test("provenance-aware dedup: identical content from different origins coexist (no tier clobber)", async () => {
-  const Store = new InMemoryDocumentStore();
-  await IngestDocuments(
+test("provenance-aware dedup: a Raw/Rejected copy never blocks or clobbers the training copy", async () => {
+  // Raw first, then the local MIT copy of the same bytes: the training copy is still stored.
+  const RawFirst = new InMemoryDocumentStore();
+  const RawStats = await IngestDocuments(
+    [
+      { Source: "web", License: "unknown", Lang: "ts", Content: Clean, Provenance: "http://x", Origin: "web-general" },
+      { Source: "local", License: "MIT", Lang: "ts", Content: Clean, Provenance: "a.ts", Origin: "local" },
+    ],
+    RawFirst,
+    "2026-07-13T00:00:00.000Z",
+  );
+  expect(RawStats).toMatchObject({ New: 2, Duplicate: 0 });
+  expect((await RawFirst.ByTier("Filtered")).length).toBe(1); // local MIT is training-eligible
+  expect((await RawFirst.ByTier("Raw")).length).toBe(1); // general web stays isolated
+
+  // Filtered first: the later Raw copy of the same bytes is a content duplicate (not stored) and the
+  // Filtered row is untouched.
+  const FilteredFirst = new InMemoryDocumentStore();
+  const Stats = await IngestDocuments(
     [
       { Source: "local", License: "MIT", Lang: "ts", Content: Clean, Provenance: "a.ts", Origin: "local" },
       { Source: "web", License: "unknown", Lang: "ts", Content: Clean, Provenance: "http://x", Origin: "web-general" },
     ],
-    Store,
+    FilteredFirst,
     "2026-07-13T00:00:00.000Z",
   );
-  expect(await Store.Count()).toBe(2); // the web copy does NOT overwrite the local one
-  expect((await Store.ByTier("Filtered")).length).toBe(1); // local MIT stays training-eligible
-  expect((await Store.ByTier("Raw")).length).toBe(1); // general web stays isolated
+  expect(Stats).toMatchObject({ New: 1, Duplicate: 1, Ingested: 2 });
+  expect(await FilteredFirst.Count()).toBe(1);
+  expect((await FilteredFirst.ByTier("Filtered"))[0]?.Provenance).toBe("a.ts");
+});
+
+test("exact dedup across licenses: the same bytes under MIT and Apache are stored once", async () => {
+  const Store = new InMemoryDocumentStore();
+  const Mit: SourceInput = { Source: "a/lib", License: "MIT", Lang: "go", Content: GoSnippet, Provenance: "a.go", Origin: "web-permissive" };
+  const Apache: SourceInput = { ...Mit, Source: "b/fork", License: "Apache-2.0", Provenance: "b.go" };
+  // In-batch: the second copy is a duplicate of the first.
+  const First = await IngestDocuments([Mit, Apache], Store, "2026-07-13T00:00:00.000Z");
+  expect(First).toMatchObject({ New: 1, Duplicate: 1, Ingested: 2, Failed: 0 });
+  expect(First.ByTier.Filtered).toBe(2); // both copies were judged Filtered; only one row exists
+  expect(await Store.Count()).toBe(1);
+  // Across batches: the stored hash is found by the batched ExistingContentHashes lookup.
+  const Second = await IngestDocuments([{ ...Mit, License: "BSD-3-Clause", Source: "c/fork", Provenance: "c.go" }], Store, "2026-07-14T00:00:00.000Z");
+  expect(Second).toMatchObject({ New: 0, Duplicate: 1 });
+  expect(await Store.Count()).toBe(1);
+  expect((await Store.All())[0]?.Source).toBe("a/lib"); // first-seen provenance wins
+
+  // A Rejected copy (GPL) of bytes already stored is a duplicate too: no redundant audit row.
+  const Gpl = await IngestDocuments([{ ...Mit, License: "GPL-3.0", Provenance: "d.go" }], Store, "2026-07-14T00:00:00.000Z");
+  expect(Gpl).toMatchObject({ New: 0, Duplicate: 1 });
+  expect(Gpl.ByTier.Rejected).toBe(1);
+});
+
+test("a rejected copy stored first does not block the permissive training copy", async () => {
+  const Store = new InMemoryDocumentStore();
+  const Gpl: SourceInput = { Source: "g/lib", License: "GPL-3.0", Lang: "go", Content: GoSnippet, Provenance: "g.go", Origin: "web-permissive" };
+  await IngestDocuments([Gpl], Store, "2026-07-13T00:00:00.000Z");
+  const Stats = await IngestDocuments([{ ...Gpl, License: "MIT", Source: "m/lib", Provenance: "m.go" }], Store, "2026-07-13T00:00:00.000Z");
+  expect(Stats).toMatchObject({ New: 1, Duplicate: 0 });
+  expect((await Store.ByTier("Filtered")).length).toBe(1);
+  expect((await Store.ByTier("Rejected")).length).toBe(1);
+});
+
+test("a failed content-hash lookup degrades to in-batch dedup with a warning", async () => {
+  class LookupDownStore extends InMemoryDocumentStore {
+    override async ExistingContentHashes(): Promise<Set<string>> {
+      throw new Error("lookup down");
+    }
+  }
+  const Warnings: string[] = [];
+  const One: SourceInput = { Source: "s", License: "MIT", Lang: "ts", Content: Clean, Provenance: "a.ts", Origin: "local" };
+  const Stats = await IngestDocuments([One, { ...One, License: "ISC" }], new LookupDownStore(), "2026-07-13T00:00:00.000Z", 256, undefined, new IngestFailureBudget((M) => Warnings.push(M)));
+  expect(Stats).toMatchObject({ New: 1, Duplicate: 1, Failed: 0 });
+  expect(Warnings.join("\n")).toContain("lookup down");
+});
+
+test("tiering: code below the educational threshold is Rejected with its two worst features", () => {
+  const StringTable = `export const Messages = {\n${Array.from({ length: 40 }, (_V, I) => `  Key${I}: "This is the translated user interface message number ${I}",`).join("\n")}\n};\n`;
+  const Decision = ClassifyDocument("MIT", StringTable, "web-permissive", { Lang: "typescript" });
+  expect(Decision.Tier).toBe("Rejected");
+  expect(String(Decision.RejectReason)).toMatch(/^low educational value: \w+=.*, \w+=/);
+  expect(String(Decision.RejectReason)).toContain("StringLiteralRatio");
+  expect(Decision.QualityScore).toBeLessThan(0.3);
+  // Without a code Lang (or as curated prose) the educational gate does not apply.
+  expect(ClassifyDocument("MIT", StringTable, "web-permissive").RejectReason ?? "").not.toContain("educational");
+  expect(ClassifyDocument("MIT", StringTable, "curated", { Lang: "typescript" }).RejectReason ?? "").not.toContain("educational");
+});
+
+test("tiering: QualityScore is the educational score for code that passes the structural gate", () => {
+  const Documented = `/**\n * Clamp a value into [Low, High].\n * @example Clamp(5, 0, 3) // 3\n */\nexport function Clamp(Value: number, Low: number, High: number): number {\n  if (Low > High) throw new RangeError("Low must not exceed High");\n  // Math.min/max keep NaN out of the happy path.\n  return Math.min(High, Math.max(Low, Value));\n}\n`;
+  const Strict = ClassifyDocument("MIT", Documented, "web-permissive", { Lang: "ts" });
+  expect(Strict.Tier).toBe("Filtered");
+  const Structural = ClassifyDocument("MIT", Documented, "web-permissive");
+  expect(Strict.QualityScore).not.toBe(Structural.QualityScore);
+  // A license-rejected doc still records the educational score (what a license backfill judges).
+  expect(ClassifyDocument("NOASSERTION", Documented, "web-permissive", { Lang: "ts" }).QualityScore).toBe(Strict.QualityScore);
 });
 
 // A store whose Upsert fails for every row the predicate selects (by 0-based call index).

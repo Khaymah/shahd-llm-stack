@@ -112,6 +112,7 @@ export async function EnsureTrigramExtension(Sql: SqlClient): Promise<boolean> {
  *                              server locale and matches the in-memory store exactly
  *   source / (tier, source)  — per-repo rollups, skip-learned, license backfill
  *   license                  — facet filter + NOASSERTION backfill
+ *   content_hash             — exact dedup across licenses/origins at ingest (ExistingContentHashes)
  *   (ingested_at, id) DESC   — the browse order (newest first, id tie-break) without a sort
  *   trigram on content/provenance — the case-insensitive substring search (only with pg_trgm)
  */
@@ -122,6 +123,7 @@ export async function EnsureDocumentIndexes(Sql: SqlClient, Table: string, WithT
   await Sql`CREATE INDEX IF NOT EXISTS ${Name("source")} ON ${Sql(Table)} (source)`;
   await Sql`CREATE INDEX IF NOT EXISTS ${Name("license")} ON ${Sql(Table)} (license)`;
   await Sql`CREATE INDEX IF NOT EXISTS ${Name("tier_source")} ON ${Sql(Table)} (tier, source)`;
+  await Sql`CREATE INDEX IF NOT EXISTS ${Name("content_hash")} ON ${Sql(Table)} (content_hash)`;
   await Sql`CREATE INDEX IF NOT EXISTS ${Name("ingested_at_id")} ON ${Sql(Table)} (ingested_at DESC, id DESC)`;
   if (!WithTrigram) return;
   // Per-index guard: a trigram build can fail on its own (e.g. disk/maintenance_work_mem) without

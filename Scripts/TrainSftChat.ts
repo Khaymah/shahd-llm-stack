@@ -8,6 +8,12 @@
 // teaches FORMAT + tool-calling + thinking scaffold, not fluency/knowledge (scale-bound).
 //
 //   bun run Scripts/TrainSftChat.ts --Name=Chat --Steps=600
+//   bun run Scripts/TrainSftChat.ts --Name=ChatV2 --From=BaseV2 --Spec=Data/Spec.json   # recipe v2
+//
+// Held-out discipline: code and conversation documents on the VALIDATION side of the shared document
+// split (Brain/Data/DocumentSplit.ts) are excluded, so SFT never trains on what held-out BPB measures.
+// --Tokenizer reuses a persisted tokenizer for a from-scratch run (default Data/Tokenizer.v1.json when it
+// exists); a resume or --From keeps the checkpoint's own merges. --Spec sets the context default.
 
 import { LoadConfig } from "../Brain/Config/LoadConfig.ts";
 import { CreateRngStreams } from "../Brain/Random/SeededRng.ts";
@@ -18,9 +24,8 @@ import { Shahd } from "../Brain/Nn/Shahd.ts";
 import { CreateOptimizer, ComputeLr } from "../Brain/Optim/OptimBarrel.ts";
 import { ClipGradsChecked } from "../Brain/Training/RunTrainingSteps.ts";
 import { SftForwardBackward } from "../Brain/Sft/SftStep.ts";
-import { RenderForTraining, ChatTokenList, RenderChat } from "../Brain/Sft/ChatTemplate.ts";
+import { RenderForTraining, RenderChat } from "../Brain/Sft/ChatTemplate.ts";
 import type { TrainingSequence } from "../Brain/Sft/ChatTemplate.ts";
-import { ToolTokenList } from "../Brain/Serving/ToolProtocol.ts";
 import { BuildOwnedConversations, OwnedSystemPrompt } from "../Brain/Sft/OwnedSftData.ts";
 import type { CodeSample } from "../Brain/Sft/OwnedSftData.ts";
 import { Generate } from "../Brain/Sampling/Generate.ts";
@@ -29,14 +34,17 @@ import { BuildCheckpoint } from "../Brain/Checkpoint/CheckpointWriter.ts";
 import { ApplyCheckpoint, ApplyCheckpointWeights } from "../Brain/Checkpoint/CheckpointReader.ts";
 import type { Checkpoint } from "../Brain/Checkpoint/CheckpointFormat.ts";
 import { PostgresCheckpointStore } from "../Foundry/PostgresCheckpointStore.ts";
+import type { TierDocument } from "../Foundry/DocumentStore.ts";
 import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
 import { CreateTrainWorkerPool } from "../Brain/Training/WorkerPool.ts";
 import { StripThinking } from "../Brain/Reasoning/ThinkingMode.ts";
 import { Decontaminate } from "../Brain/Data/Decontamination.ts";
 import { TrainingDecontaminationDocs } from "../Brain/Eval/Suite/SuiteEvalDocs.ts";
+import { PartitionByDocumentSplit, TrainingSideReadSize } from "../Brain/Data/DocumentSplit.ts";
 import { ResolveFoundryStores } from "./FoundryEnv.ts";
 import { ReadArg, ReadFlag } from "./ScriptArgs.ts";
-import { existsSync } from "node:fs";
+import { ChatSpecials, CheckpointStep, ChooseTokenizerFile, DecideResume, PickMerges, ReadBpeState, ResolveSpec, StopFilePredicate } from "./TrainingCorpus.ts";
+import type { BpeTokenizerState } from "./TrainingCorpus.ts";
 
 const Name = ReadArg("--Name=", "Chat");
 const Steps = Number(ReadArg("--Steps=", "600"));
@@ -44,7 +52,9 @@ const NumMerges = Number(ReadArg("--Merges=", "700"));
 const EmbedDim = Number(ReadArg("--EmbedDim=", "192"));
 const NumLayers = Number(ReadArg("--Layers=", "4"));
 const NumHeads = Number(ReadArg("--Heads=", "4"));
-const BlockSize = Number(ReadArg("--Block=", "256"));
+// --Spec (opt-in): the context default comes from Spec.Training.ContextTokens (match the base's).
+const Spec = ResolveSpec(ReadArg("--Spec=", "none"), false)?.Spec ?? null;
+const BlockSize = Number(ReadArg("--Block=", Spec !== null ? String(Spec.Training.ContextTokens) : "256"));
 const BatchSize = Number(ReadArg("--Batch=", "8"));
 const Workers = Number(ReadArg("--Workers=", "0")); // sequence-parallel worker threads; 0 = sequential
 const Lr = Number(ReadArg("--Lr=", "0.002"));
@@ -54,6 +64,9 @@ const From = ReadArg("--From=", ""); // warm-start a NEW chat run from a pretrai
 // Storage precision (see TrainOnFoundry): inherited from the checkpoint on resume and from the
 // BASE on --From (its weights are stored in that width's distribution).
 const Precision = ReadArg("--Precision=", "F64") === "F32" ? "F32" as const : "F64" as const;
+// Persisted tokenizer for a from-scratch run: explicit file > Data/Tokenizer.v1.json when present >
+// merges learned from the SFT corpus ("fresh"). Resume / --From always keep the checkpoint's merges.
+const TokenizerFile = ChooseTokenizerFile(ReadArg("--Tokenizer=", ""));
 
 // 1) SFT data from the SEPARATED kind tables, each capped independently: code (for the owned
 // language-ID task) from documents_code, real dialogue from documents_conversation. Knowledge
@@ -73,8 +86,17 @@ const CodeConvs = Number(ReadArg("--CodeConvs=", "800"));
 // mature checkpoint, so the heavier dose costs them nothing.
 const MultiTurn = Number(ReadArg("--MultiTurn=", "3000"));
 const Stores = ResolveFoundryStores();
-const CodeDocs = await Stores.Kind("code").ByTier("Filtered", CodeSamples);
-const ConvDocs = await Stores.Kind("conversation").ByTier("Filtered", ConvCount);
+// Only the TRAINING side of the document split: over-read so ~the requested count survives the 10%
+// hold-out, then cap. Same ascending-id read as before, so the selection stays deterministic.
+async function TrainingSide(Kind: "code" | "conversation", Wanted: number): Promise<{ Docs: TierDocument[]; HeldOut: number }> {
+  const Split = PartitionByDocumentSplit(await Stores.Kind(Kind).ByTier("Filtered", TrainingSideReadSize(Wanted)));
+  return { Docs: Split.Train.slice(0, Wanted), HeldOut: Split.Validation.length };
+}
+const CodeSide = await TrainingSide("code", CodeSamples);
+const ConvSide = await TrainingSide("conversation", ConvCount);
+const CodeDocs = CodeSide.Docs;
+const ConvDocs = ConvSide.Docs;
+console.log(`held out (validation side of the document split, never trained): ${CodeSide.HeldOut} code + ${ConvSide.HeldOut} conversation docs`);
 const Samples: CodeSample[] = CodeDocs.map((D) => ({ Lang: D.Lang, Content: D.Content }));
 const Rng = CreateRngStreams(1234);
 const Conversations = BuildOwnedConversations(Samples, Rng.DataRng, { ArithmeticCount, ThinkingCount, PersonaRepeats: 25, MaxCodeConversations: CodeConvs, MultiTurnCount: MultiTurn });
@@ -106,33 +128,37 @@ console.log(`sft: ${Conversations.length} conversations (${CodeDocs.length} code
 // dashboard "train it more" flow). Requires a matching architecture, else it starts fresh.
 const DbUrl = process.env["DATABASE_URL"];
 const CkptStore = DbUrl !== undefined && DbUrl !== "" ? new PostgresCheckpointStore(DbUrl) : null;
-type ChatTokenizerState = { Kind: string; Merges: [number, number][]; Specials: string[] };
+type ChatTokenizerState = { Merges: [number, number][]; Specials: string[] };
 let Resume: { Ckpt: Checkpoint; Step: number } | null = null;
 let ResumeState: ChatTokenizerState | null = null;
 if (CkptStore !== null && !Fresh) {
-  const Existing = await CkptStore.Load(Name);
-  const State = (Existing?.TokenizerState ?? null) as ChatTokenizerState | null;
-  if (Existing !== null && State !== null && State.Kind === "Bpe" && Array.isArray(State.Merges) && Array.isArray(State.Specials)) {
-    const M = Existing.Config.Model;
-    const ArchMatch = M.EmbedDim === EmbedDim && M.NumLayers === NumLayers && M.NumHeads === NumHeads && M.BlockSize === BlockSize;
-    const Match = ArchMatch && (ResumeFlag || Existing.Config.Schedule.MaxSteps === Steps);
-    const DoneStep = Number((Existing.Meta as Record<string, unknown>)["Step"] ?? 0);
-    if (Match && DoneStep < Steps) {
-      Resume = { Ckpt: Existing, Step: DoneStep };
-      ResumeState = State;
-    }
-  }
-  // OVERWRITE GUARD — same contract as TrainOnFoundry: reusing a name never silently replaces a
-  // saved model; overwriting must be explicit (--Fresh).
-  if (Existing !== null && Resume === null) {
-    const At = Number((Existing.Meta as Record<string, unknown>)["Step"] ?? 0);
-    console.error(
-      ResumeFlag
-        ? `cannot resume "${Name}": the saved chat model (step ${At}) has a different architecture/tokenizer or is already at/past the requested ${Steps} steps — pick a new name or raise Steps`
-        : `model "${Name}" already exists (step ${At}) — pick a NEW name, enable Resume to extend it, or pass --Fresh to overwrite it intentionally`,
-    );
+  // Same contract as TrainOnFoundry (DecideResume): resume a matching same-name run, else refuse to
+  // overwrite it unless --Fresh.
+  const Decision = DecideResume({
+    Existing: await CkptStore.Load(Name),
+    Name,
+    Steps,
+    ResumeFlag,
+    RequireSpecials: true,
+    What: "chat model",
+    ArchMatches: (Ckpt) => {
+      const M = Ckpt.Config.Model;
+      return M.EmbedDim === EmbedDim && M.NumLayers === NumLayers && M.NumHeads === NumHeads && M.BlockSize === BlockSize;
+    },
+  });
+  if (Decision.Refusal !== null) {
+    console.error(Decision.Refusal);
     process.exit(1);
   }
+  if (Decision.Resume !== null) {
+    Resume = { Ckpt: Decision.Resume.Ckpt, Step: Decision.Resume.Step };
+    ResumeState = ChatState(Decision.Resume.State);
+  }
+}
+
+/** A BPE state with its specials (DecideResume/RequireSpecials and the --From check guarantee them). */
+function ChatState(State: BpeTokenizerState): ChatTokenizerState {
+  return { Merges: State.Merges, Specials: State.Specials ?? [] };
 }
 
 // WARM START (--From): begin a NEW chat run from a pretrained BASE checkpoint's weights — the
@@ -155,12 +181,13 @@ if (From !== "") {
       console.error(`--From: base model "${From}" not found`);
       process.exit(1);
     }
-    const State = (BaseCkpt.TokenizerState ?? null) as ChatTokenizerState | null;
-    if (State === null || State.Kind !== "Bpe" || !Array.isArray(State.Merges) || !Array.isArray(State.Specials)) {
+    const Base = ReadBpeState(BaseCkpt);
+    if (Base === null || Base.Specials === null) {
       console.error(`--From: base model "${From}" has no reusable BPE tokenizer state`);
       process.exit(1);
     }
-    const Missing = [...ChatTokenList, ...ToolTokenList].filter((T) => !State.Specials.includes(T));
+    const State = ChatState(Base);
+    const Missing = ChatSpecials.filter((T) => !State.Specials.includes(T));
     if (Missing.length > 0) {
       console.error(`--From: base "${From}" vocab lacks the chat/tool specials (${Missing.join(", ")}) — retrain the base (TrainOnFoundry now reserves them)`);
       process.exit(1);
@@ -175,18 +202,28 @@ if (From !== "") {
 }
 
 // 2) SpecialTokenizer = byte-level BPE + chat/tool special tokens. Reuse the checkpoint's exact merges
-// + specials when resuming or warm-starting (so token ids align with the trained embeddings); else
-// train fresh BPE on the SFT corpus.
+// + specials when resuming or warm-starting (so token ids align with the trained embeddings; an explicit
+// --Tokenizer that disagrees is refused); else the persisted tokenizer file; else fresh BPE on the SFT
+// corpus.
 const Inherit = ResumeState ?? Warm?.State ?? null;
-const Specials = Inherit !== null ? Inherit.Specials : [...ChatTokenList, ...ToolTokenList];
+const Specials = Inherit !== null ? Inherit.Specials : [...ChatSpecials];
 const CorpusText = Conversations.flatMap((C) => C.map((M) => M.Content)).join("\n");
-const Bpe = Inherit !== null ? { Merges: Inherit.Merges } : TrainBpe(CorpusText, NumMerges);
+let Choice: ReturnType<typeof PickMerges>;
+try {
+  const InheritedFrom = Inherit === null ? null : { Merges: Inherit.Merges, From: ResumeState !== null ? "checkpoint" as const : "base" as const, Name: ResumeState !== null ? Name : From };
+  Choice = PickMerges(InheritedFrom, TokenizerFile, () => TrainBpe(CorpusText, NumMerges).Merges);
+} catch (Refused) {
+  console.error((Refused as Error).message);
+  if (CkptStore !== null) await CkptStore.Close();
+  process.exit(1);
+}
+const Bpe = { Merges: Choice.Merges };
 const Tokenizer = new SpecialTokenizer(new BytePairEncoder(Bpe), Specials);
 if (Warm !== null && Warm.Ckpt.Config.Model.VocabSize !== Tokenizer.VocabSize) {
   console.error(`--From: base "${From}" VocabSize ${Warm.Ckpt.Config.Model.VocabSize} != rebuilt tokenizer vocab ${Tokenizer.VocabSize} (corrupt/inconsistent tokenizer state)`);
   process.exit(1);
 }
-console.log(`tokenizer: ${Bpe.Merges.length} merges + ${Specials.length} specials -> vocab ${Tokenizer.VocabSize}${Resume !== null ? " (reused from checkpoint)" : Warm !== null ? ` (reused from base "${From}")` : ""}`);
+console.log(`tokenizer: ${Bpe.Merges.length} merges + ${Specials.length} specials -> vocab ${Tokenizer.VocabSize} (${Choice.Origin})`);
 
 // 3) Pre-render every conversation with the loss mask; keep only those that fit the context AND have
 // at least one trainable (assistant) token. Report how many were dropped (no silent truncation).
@@ -229,11 +266,14 @@ if (Resume !== null) {
   StartStep = Resume.Step;
 } else if (Warm !== null) {
   ApplyCheckpointWeights(Warm.Ckpt, Model); // weights only — fresh AdamW/schedule/RNG for the SFT stage
-  console.log(`warm start: applied base "${From}" weights (pretrained to step ${Number((Warm.Ckpt.Meta as Record<string, unknown>)["Step"] ?? 0)})`);
+  console.log(`warm start: applied base "${From}" weights (pretrained to step ${CheckpointStep(Warm.Ckpt)})`);
 }
 // Sequence-parallel pool (after ApplyCheckpoint so the shared weights start from the restored
 // values). Batch size comes from the RESOLVED config — on resume it is the checkpoint's, not the CLI's.
 const EffBatch = Config.Training.BatchSize;
+// Report how many passes over the SFT set this run makes (sequence epochs; SFT revisits examples by
+// design, so this is reported, not enforced — the pretraining epoch guard lives in TrainOnFoundry).
+console.log(`sft epochs ~ ${((Steps * EffBatch) / Rendered.length).toFixed(2)} (${Steps} steps x batch ${EffBatch} over ${Rendered.length} sequences)`);
 const Pool = Config.Training.Workers > 0 ? await CreateTrainWorkerPool(Model, Config, "sft") : null;
 const Params = Model.Parameters().reduce((A, P) => A + P.Size, 0);
 console.log(`model: ${Params.toLocaleString()} params (emb=${EmbedDim} L=${NumLayers} ctx=${BlockSize}); backend ${ComputeChoice.Chosen}${Pool !== null ? `; ${Pool.WorkerCount} workers` : ""}; ${Resume !== null ? `resuming from step ${StartStep}` : Warm !== null ? `warm from base "${From}"` : "fresh"} -> ${Steps} SFT steps`);
@@ -250,7 +290,7 @@ function BuildAt(Step: number): Checkpoint {
 const CheckEvery = Math.max(50, Math.floor(Steps / 20));
 // Graceful pause (--StopFile appears — the dashboard's Stop button): checked once per step so the
 // checkpoint lands on the EXACT step the user stopped at, not the last periodic save.
-const StopFile = ReadArg("--StopFile=", "");
+const ShouldStop = StopFilePredicate(ReadArg("--StopFile=", ""));
 for (let Step = StartStep; Step < Steps; Step++) {
   const CurrentLr = ComputeLr(Step, Config);
   let MeanLoss: number;
@@ -281,7 +321,7 @@ for (let Step = StartStep; Step < Steps; Step++) {
     await CkptStore.Save(Name, BuildAt(Step + 1), new Date().toISOString());
     console.log(`checkpoint "${Name}" saved at step ${Step + 1}/${Steps}`);
   }
-  if (StopFile !== "" && Step + 1 < Steps && existsSync(StopFile)) {
+  if (ShouldStop !== undefined && Step + 1 < Steps && ShouldStop()) {
     if (CkptStore !== null) {
       await CkptStore.Save(Name, BuildAt(Step + 1), new Date().toISOString());
       await CkptStore.Close();

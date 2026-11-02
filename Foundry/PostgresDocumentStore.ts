@@ -187,6 +187,22 @@ export class PostgresDocumentStore implements DocumentStore {
     return Rows[0] ? FromRow(Rows[0]) : null;
   }
 
+  async ExistingContentHashes(Hashes: readonly string[], Tier?: Tier): Promise<Set<string>> {
+    // Chunked so a large ingest batch never builds an IN-list past the bind-parameter limit; each
+    // chunk is one index lookup on <table>_content_hash_idx (see EnsureDocumentIndexes).
+    const Unique = [...new Set(Hashes)];
+    const Found = new Set<string>();
+    for (let Start = 0; Start < Unique.length; Start += MaxPageLimit) {
+      const Chunk = Unique.slice(Start, Start + MaxPageLimit);
+      const InChunk = inArray(this.Table.contentHash, Chunk);
+      const Rows = await this.Db.selectDistinct({ Hash: this.Table.contentHash })
+        .from(this.Table)
+        .where(Tier === undefined ? InChunk : and(InChunk, eq(this.Table.tier, Tier)));
+      for (const Row of Rows) Found.add(Row.Hash);
+    }
+    return Found;
+  }
+
   async ContentByIds(Ids: readonly string[]): Promise<Map<string, string>> {
     const Wanted = Ids.slice(0, MaxPageLimit);
     if (Wanted.length === 0) return new Map();

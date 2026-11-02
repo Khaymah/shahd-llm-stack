@@ -14,12 +14,13 @@ import { DataKinds } from "../Foundry/DataKinds.ts";
 import type { DataKind } from "../Foundry/DataKinds.ts";
 import type { RepoSummary } from "../Foundry/DocumentStore.ts";
 import { DetectSpdx } from "../Foundry/SpdxDetector.ts";
+import { ActiveEduWeights } from "../Brain/Data/EducationalScore.ts";
 import { FetchRepoLicense } from "../Foundry/GitHubHttp.ts";
 import { GitHubToken, ResolveFoundryStores } from "./FoundryEnv.ts";
 import { ReadFlag } from "./ScriptArgs.ts";
 
 const Apply = ReadFlag("--Apply");
-const MinQuality = 0.6; // matches ScoreCodeQuality's pass Threshold — promote only quality-passing docs
+const MinQuality = ActiveEduWeights().Threshold; // the same gate Tiering applies, so a backfill never promotes what ingest would reject
 const Unresolved = "NOASSERTION";
 const Token = GitHubToken();
 const Stores = ResolveFoundryStores();

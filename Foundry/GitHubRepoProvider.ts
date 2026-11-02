@@ -8,12 +8,12 @@ import type { WebProvider, RepoSink } from "./WebSource.ts";
 import type { SourceInput } from "./Ingest.ts";
 import type { HttpJson, FetchBytes, RepoLicense } from "./GitHubHttp.ts";
 import { DefaultGitHubJson, DefaultGitHubBytes, FetchRepoLicense } from "./GitHubHttp.ts";
-import { DetectSpdx } from "./SpdxDetector.ts";
 import { FetchRepoFiles } from "./RepoArchive.ts";
 import { AssessRepo, LevelRank, EmptyAssessment } from "./RepoQuality.ts";
 import type { RepoLevel, RepoIngestInfo } from "./RepoQuality.ts";
 import { LangForPath } from "./CodeFileFilter.ts";
 import { ResolveFileLicense } from "./FileLicenseHeader.ts";
+import { ResolvePermissiveLicense } from "./GitHubRepoListProvider.ts";
 
 type RepoItem = { full_name: string; default_branch: string; license: { spdx_id: string } | null };
 type SearchResult = { items?: RepoItem[] };
@@ -38,32 +38,6 @@ export type GitHubRepoOptions = {
 const SearchPerPage = 100;
 const SearchMaxResults = 1000;
 
-// GitHub returns spdx_id "NOASSERTION" (or none) for repos whose LICENSE its matcher can't classify —
-// which the Foundry would reject on license grounds even when the code is actually MIT/BSD/Apache.
-// Read the real LICENSE text and, ONLY when it is provably a single clean permissive template, use the
-// detected SPDX id. Anything ambiguous/copyleft/commercial keeps its unresolved label and stays
-// rejected. A fetch/detect failure is non-fatal — the label is simply left unchanged.
-async function ResolvePermissiveLicense(
-  FullName: string,
-  Current: string,
-  Fetch: (Name: string) => Promise<RepoLicense | null>,
-  Log: (Message: string) => void,
-): Promise<string> {
-  try {
-    const License = await Fetch(FullName);
-    if (License === null) return Current;
-    const Detected = DetectSpdx(License.Text);
-    if (Detected.Permissive && Detected.Spdx !== null) {
-      Log(`[gh] ${FullName}: license ${Current} -> ${Detected.Spdx} (verified permissive from LICENSE)`);
-      return Detected.Spdx;
-    }
-    Log(`[gh] ${FullName}: license stays ${Current} (${Detected.Note})`);
-    return Current;
-  } catch (Caught) {
-    Log(`[gh] ${FullName}: license resolve failed: ${(Caught as Error).message}`);
-    return Current;
-  }
-}
 
 export function CreateGitHubRepoProvider(Options: GitHubRepoOptions = {}): WebProvider {
   const Http = Options.Http ?? DefaultGitHubJson(Options.Token);

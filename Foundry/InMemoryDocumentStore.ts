@@ -87,6 +87,16 @@ export class InMemoryDocumentStore implements DocumentStore {
     return this.Docs.get(Id) ?? null;
   }
 
+  async ExistingContentHashes(Hashes: readonly string[], Tier?: Tier): Promise<Set<string>> {
+    const Wanted = new Set(Hashes);
+    const Found = new Set<string>();
+    if (Wanted.size === 0) return Found;
+    for (const Doc of this.Docs.values()) {
+      if (Wanted.has(Doc.ContentHash) && (Tier === undefined || Doc.Tier === Tier)) Found.add(Doc.ContentHash);
+    }
+    return Found;
+  }
+
   async ContentByIds(Ids: readonly string[]): Promise<Map<string, string>> {
     const Out = new Map<string, string>();
     for (const Id of Ids.slice(0, MaxPageLimit)) {

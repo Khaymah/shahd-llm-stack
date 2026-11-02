@@ -58,6 +58,44 @@ much training" is tokens seen (`steps × batch × context`). The table's Steps a
 their batch is large — at a tiny CPU batch the same token budget needs 10–20× more steps, which is
 exactly why the larger tiers need a GPU: big batches cut the step count and each step runs far faster.
 
+### Recipe v2 — spec-driven data, one tokenizer, ≤ 4 epochs, WSD
+
+The v1 Micro run saw its ~8 MB corpus ~50 times (it memorised). Recipe v2 changes four things, all
+driven by the Data Spec (`Data/Spec.json`, see `Data/Spec.md`):
+
+1. **One persisted tokenizer, trained on the full mix.** `bun run train:bpe` samples `--SampleMb`
+   (default 30) from the Filtered tier, split across the spec's slices by `Weight` (default
+   `TargetMb`; each slice's `Langs` select its documents; held-out documents excluded; ascending-id
+   order, so the sample is deterministic) and learns `VocabSize − 256 − specials` merges (16,384 total
+   vocab → 16,114 merges). It writes `Data/Tokenizer.v1.json` and never overwrites one without
+   `--Force`. Every training run then reuses it (`--Tokenizer`, default = that file when present);
+   a resumed or warm-started run keeps its checkpoint's own merges and refuses an explicit
+   `--Tokenizer` that disagrees. The trainer is incremental (16K merges over ~27 MB of code: ~3 s on
+   CPU) and reproduces the original trainer merge-for-merge.
+2. **The epoch guard.** With `--Spec`, `TrainOnFoundry` builds the pretraining mix per slice and,
+   before touching any weight, prints `epochs = Steps × Batch × Context / unique training tokens`. Above
+   `Spec.Training.MaxEpochs` (4) it refuses and prints the largest `--Steps` that fits; more data is
+   the fix, `--AllowEpochs=<n>` the deliberate override. Without `--Spec` the number is reported only.
+3. **WSD schedule** (`Schedule.Kind: "Wsd"`, the default under `--Spec`): linear warmup → constant peak
+   → linear decay to `MinLrRatio × peak` over the last `DecayFraction` (default 0.1) of `MaxSteps`. It is
+   a pure function of the step, and the flat middle means a run can be extended with `--Resume` (higher
+   `--Steps`) before its decay window without an LR jump. `--Schedule=Cosine` keeps the old curve.
+4. **SFT respects the split.** `TrainSftChat` drops every code/conversation document on the validation
+   side of `Brain/Data/DocumentSplit.ts` (the same rule pretraining and the eval suite's held-out BPB
+   use) and logs how many it held out — chat tuning can no longer contaminate held-out BPB.
+
+```bash
+bun run train:bpe                                            # Data/Spec.json -> Data/Tokenizer.v1.json
+bun run Scripts/TrainOnFoundry.ts --Spec=Data/Spec.json --Name=MicroV2 \
+  --EmbedDim=256 --Layers=6 --Heads=4 --Batch=16 --Workers=8 --Precision=F32 --Steps=20000
+# refused? it prints the max --Steps for the data you have; add data or lower Steps
+bun run Scripts/TrainSftChat.ts --Spec=Data/Spec.json --Name=MicroV2Chat --From=MicroV2 \
+  --EmbedDim=256 --Layers=6 --Heads=4 --Steps=3000
+```
+
+`--Spec` also sets the context default (`Spec.Training.ContextTokens`, 1,024) for both scripts — pass
+the same `--Block` to SFT as the base used, since `--From` requires an identical architecture.
+
 ---
 
 ## 2. From a base model to a chat model (SFT)

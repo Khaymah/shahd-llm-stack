@@ -38,6 +38,10 @@ export const DefaultConfig: ShahdConfig = {
     WarmupSteps: 100,
     MaxSteps: 5000,
     MinLrRatio: 0.1,
+    // Wsd only: the last 10% of MaxSteps decays peak -> MinLrRatio * peak; the 90% before it holds the
+    // peak. Short enough that most of the run trains at full LR, long enough to anneal (WSD/MiniCPM
+    // report 10–20%). Ignored by Cosine/Constant.
+    DecayFraction: 0.1,
   },
   Training: {
     BatchSize: 16, // gradient-accumulation count

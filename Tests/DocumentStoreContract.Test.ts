@@ -12,6 +12,8 @@ import { EnsureDocumentIndexes, EnsureDocumentTable, EnsureTrigramExtension } fr
 import { DefaultPageLimit, MaxPageLimit } from "../Foundry/DocumentStore.ts";
 import type { DocumentStore } from "../Foundry/DocumentStore.ts";
 import type { DocumentRecord } from "../Foundry/DocumentRecord.ts";
+import { IngestDocuments } from "../Foundry/Ingest.ts";
+import type { SourceInput } from "../Foundry/Ingest.ts";
 
 const DatabaseUrl = process.env["DATABASE_URL"] ?? "";
 const PostgresTimeoutMs = 60_000;
@@ -256,6 +258,36 @@ for (const Factory of Factories) {
       });
     }, PostgresTimeoutMs);
 
+    test("ExistingContentHashes: batched, any tier or one tier, absent hashes omitted", async () => {
+      await WithStore(Factory, async (Store) => {
+        await Store.Upsert(MakeDoc(1, { ContentHash: "h-filtered" }));
+        await Store.Upsert(MakeDoc(2, { ContentHash: "h-rejected", Tier: "Rejected" }));
+        await Store.Upsert(MakeDoc(3, { ContentHash: "h-filtered", License: "Apache-2.0" })); // same bytes, other license
+        expect(await Store.ExistingContentHashes([])).toEqual(new Set());
+        expect(await Store.ExistingContentHashes(["h-filtered", "h-rejected", "h-absent", "h-filtered"])).toEqual(new Set(["h-filtered", "h-rejected"]));
+        expect(await Store.ExistingContentHashes(["h-filtered", "h-rejected"], "Filtered")).toEqual(new Set(["h-filtered"]));
+        expect(await Store.ExistingContentHashes(["h-filtered", "h-rejected"], "Raw")).toEqual(new Set());
+        // More hashes than one lookup chunk: still answered completely.
+        const Many = Array.from({ length: MaxPageLimit + 7 }, (_V, I) => `h-miss-${I}`);
+        expect(await Store.ExistingContentHashes([...Many, "h-rejected"])).toEqual(new Set(["h-rejected"]));
+      });
+    }, PostgresTimeoutMs);
+
+    test("IngestDocuments: the same bytes under two licenses are one row; duplicates are counted", async () => {
+      await WithStore(Factory, async (Store) => {
+        const Content = "package mathx\n\n// Max returns the larger of a and b.\nfunc Max(a, b int) int {\n\tif a > b {\n\t\treturn a\n\t}\n\treturn b\n}\n";
+        const Mit: SourceInput = { Source: "a/lib", License: "MIT", Lang: "go", Content, Provenance: "a/max.go", Origin: "web-permissive" };
+        const First = await IngestDocuments([Mit, { ...Mit, License: "Apache-2.0", Source: "b/fork", Provenance: "b/max.go" }], Store, "2026-07-01T00:00:00.000Z");
+        expect(First).toMatchObject({ New: 1, Duplicate: 1, Ingested: 2, Failed: 0 });
+        const Second = await IngestDocuments([{ ...Mit, License: "ISC", Source: "c/fork", Provenance: "c/max.go" }], Store, "2026-07-02T00:00:00.000Z");
+        expect(Second).toMatchObject({ New: 0, Duplicate: 1, Failed: 0 });
+        expect(await Store.Count()).toBe(1);
+        const Stored = await Store.ByTier("Filtered");
+        expect(Stored.map((D) => [D.Source, D.License])).toEqual([["a/lib", "MIT"]]);
+        expect(await Store.ExistingContentHashes([Stored[0]!.ContentHash], "Filtered")).toEqual(new Set([Stored[0]!.ContentHash]));
+      });
+    }, PostgresTimeoutMs);
+
     test("FindSimilar ranks by cosine and returns full records", async () => {
       await WithStore(Factory, async (Store) => {
         await Store.Upsert(MakeDoc(1, { Embedding: [1, 0] }));
@@ -269,3 +301,21 @@ for (const Factory of Factories) {
     }, PostgresTimeoutMs);
   });
 }
+
+describe.skipIf(DatabaseUrl === "")("EnsureDocumentIndexes (Postgres)", () => {
+  test("creates the content_hash index used by the cross-license dedup", async () => {
+    const Sql = postgres(DatabaseUrl, { onnotice: () => {} });
+    const Table = `documents_index_${randomBytes(6).toString("hex")}`;
+    try {
+      await EnsureDocumentTable(Sql, Table);
+      await EnsureDocumentIndexes(Sql, Table, false);
+      await EnsureDocumentIndexes(Sql, Table, false); // idempotent
+      const Rows = await Sql<{ indexdef: string }[]>`select indexdef from pg_indexes where tablename = ${Table} and indexname = ${`${Table}_content_hash_idx`}`;
+      expect(Rows.length).toBe(1);
+      expect(Rows[0]!.indexdef).toContain("(content_hash)");
+    } finally {
+      await Sql`DROP TABLE IF EXISTS ${Sql(Table)}`;
+      await Sql.end();
+    }
+  }, PostgresTimeoutMs);
+});

@@ -71,3 +71,18 @@ test("WarmupSteps may not exceed MaxSteps", () => {
   expect(() => LoadConfig({ Overrides: { Schedule: { WarmupSteps: 11, MaxSteps: 10 } }, ...Isolated })).toThrow(/WarmupSteps/);
   expect(() => LoadConfig({ Overrides: { Schedule: { WarmupSteps: 10, MaxSteps: 10 } }, ...Isolated })).not.toThrow();
 });
+
+test("Schedule.DecayFraction defaults to 0.1 and must lie strictly inside (0, 0.5)", () => {
+  expect(LoadConfig(Isolated).Schedule.DecayFraction).toBe(0.1);
+  for (const Bad of [0, -0.1, 0.5, 0.9, Number.NaN]) {
+    expect(() => LoadConfig({ Overrides: { Schedule: { DecayFraction: Bad } }, ...Isolated })).toThrow(/DecayFraction/);
+  }
+  expect(() => LoadConfig({ Overrides: { Schedule: { Kind: "Wsd", DecayFraction: 0.49 } }, ...Isolated })).not.toThrow();
+});
+
+test("Wsd refuses a warmup that runs into the decay window", () => {
+  expect(() => LoadConfig({ Overrides: { Schedule: { Kind: "Wsd", WarmupSteps: 95, MaxSteps: 100, DecayFraction: 0.1 } }, ...Isolated })).toThrow(/decay window/);
+  expect(() => LoadConfig({ Overrides: { Schedule: { Kind: "Wsd", WarmupSteps: 90, MaxSteps: 100, DecayFraction: 0.1 } }, ...Isolated })).not.toThrow();
+  // The same warmup is fine for Cosine (no decay window).
+  expect(() => LoadConfig({ Overrides: { Schedule: { Kind: "Cosine", WarmupSteps: 95, MaxSteps: 100 } }, ...Isolated })).not.toThrow();
+});

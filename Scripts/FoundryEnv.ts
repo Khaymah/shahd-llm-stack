@@ -8,6 +8,7 @@ import type { DocumentStore } from "../Foundry/FoundryBarrel.ts";
 import { PostgresDocumentStore } from "../Foundry/PostgresDocumentStore.ts";
 import { FoundryStores } from "../Foundry/FoundryStores.ts";
 import { ResolveCheckpointDir } from "../Foundry/PostgresCheckpointStore.ts";
+import { DefaultDataSpecPath } from "../Foundry/DataSpec.ts";
 import { ReadArg } from "./ScriptArgs.ts";
 
 export function DatabaseUrl(): string {
@@ -43,6 +44,11 @@ export function ResolveFoundryStores(): FoundryStores {
 /** Web search/repo query: --Query CLI > FOUNDRY_QUERY env > the provided default. */
 export function Query(Default: string): string {
   return ReadArg("--Query=", "") || process.env["FOUNDRY_QUERY"] || Default;
+}
+
+/** The data spec file: --Spec CLI > FOUNDRY_SPEC env > DefaultDataSpecPath (Data/Spec.json). */
+export function DataSpecPath(): string {
+  return ReadArg("--Spec=", "") || process.env["FOUNDRY_SPEC"] || DefaultDataSpecPath;
 }
 
 /** Own-repo roots: --Repos CLI > FOUNDRY_REPOS env > ".". Comma-separated. */

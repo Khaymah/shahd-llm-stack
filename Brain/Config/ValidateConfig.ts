@@ -21,6 +21,12 @@ const AdamBeta = z.number().gt(0, "must be > 0").lt(1, "must be < 1 (Beta = 1 di
 export const DropoutNotImplementedMessage = "Dropout is reserved and not implemented yet (must be 0)";
 // The explicit `: boolean` stops TS from inferring a type predicate (Value is 0), which would narrow
 // the inferred config type to the literal 0 — the field stays a number knob for when it is built.
+/** First step of the WSD decay window: the last ceil(DecayFraction * MaxSteps) steps decay. The ONE
+ *  home for this boundary — the schedule (Optim/LrSchedule.ts) and the validation below share it. */
+export function WsdDecayStart(MaxSteps: number, DecayFraction: number): number {
+  return MaxSteps - Math.max(1, Math.ceil(DecayFraction * MaxSteps));
+}
+
 const ReservedDropout = z.number().refine((Value): boolean => Value === 0, { message: DropoutNotImplementedMessage });
 
 export const ModelSchema = z.object({
@@ -52,11 +58,18 @@ export const OptimizerSchema = z.object({
   GradClipNorm: PositiveFinite, // global-norm clip threshold
 });
 
+// WSD decay window: strictly inside (0, 0.5) of MaxSteps — 0 would be no decay at all (a constant LR
+// that ends at the peak), and a window of half the run or more is no longer "stable then decay".
+const WsdDecayFraction = z.number().gt(0, "must be > 0").lt(0.5, "must be < 0.5 (the decay is the run's TAIL)");
+
 export const ScheduleSchema = z.object({
-  Kind: z.enum(["Cosine", "Constant"]),
+  // Cosine: warmup -> cosine decay to the floor. Constant: the peak throughout. Wsd: warmup -> stable
+  // peak -> linear decay over the last DecayFraction of MaxSteps (resumable/extendable long runs).
+  Kind: z.enum(["Cosine", "Constant", "Wsd"]),
   WarmupSteps: z.number().int().min(0),
   MaxSteps: PositiveInt,
   MinLrRatio: UnitInterval, // floor LR as a fraction of the peak, at the end of decay
+  DecayFraction: WsdDecayFraction, // Wsd only: share of MaxSteps spent decaying (the tail)
 });
 
 export const TrainingSchema = z.object({
@@ -160,6 +173,13 @@ export const ShahdConfigSchema = z
         code: z.ZodIssueCode.custom,
         path: ["Schedule", "WarmupSteps"],
         message: `WarmupSteps (${Config.Schedule.WarmupSteps}) cannot exceed MaxSteps (${Config.Schedule.MaxSteps}).`,
+      });
+    }
+    if (Config.Schedule.Kind === "Wsd" && Config.Schedule.WarmupSteps > WsdDecayStart(Config.Schedule.MaxSteps, Config.Schedule.DecayFraction)) {
+      Ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["Schedule", "WarmupSteps"],
+        message: `Wsd: WarmupSteps (${Config.Schedule.WarmupSteps}) runs into the decay window (starts at step ${WsdDecayStart(Config.Schedule.MaxSteps, Config.Schedule.DecayFraction)}); lower WarmupSteps or DecayFraction.`,
       });
     }
     if (Config.Tokenizer.Kind === "Bpe" && Config.Tokenizer.MergesPath === undefined) {

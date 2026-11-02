@@ -94,6 +94,13 @@ export interface DocumentStore {
   DocumentsBySource(Source: string, Limit: number): Promise<DocumentRecord[]>;
   /** One document's full record by id (content hash) — powers the file viewer. Null if absent. */
   DocumentById(Id: string): Promise<DocumentRecord | null>;
+  /**
+   * Which of these content hashes (sha256 of the stored bytes, see Ingest) are already stored in this
+   * table — in any tier, or only in Tier when given. Batched exact-dedup ACROSS licenses/origins (the
+   * id includes origin + license, the content hash does not). Any number of hashes may be passed (the
+   * Postgres store chunks the lookup); duplicates in the input are fine; [] → empty set.
+   */
+  ExistingContentHashes(Hashes: readonly string[], Tier?: Tier): Promise<Set<string>>;
   /** Content for a batch of ids (absent ids are simply missing from the map). At most MaxPageLimit
    *  ids are read per call — callers page through ListSummaries and fetch content per page. */
   ContentByIds(Ids: readonly string[]): Promise<Map<string, string>>;
