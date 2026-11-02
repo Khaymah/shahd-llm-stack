@@ -91,3 +91,22 @@ test("decontamination removes train docs overlapping the eval set", () => {
   expect(Result.Removed).toContain(0);
   expect(Result.Kept).toContain(1);
 });
+
+// Decontamination fires on shared CONTENT (13 consecutive words), never on shared idioms: a Go
+// handler signature is punctuation-heavy and common to every handler, so it must not remove the
+// document, while a verbatim copy of an eval reference must.
+test("decontamination ignores punctuation idioms but catches verbatim eval content", () => {
+  const EvalDoc = [
+    "function slugify(input: string): string {",
+    "  const lowered = input.trim().toLowerCase();",
+    "  const dashed = lowered.replace(/[^a-z0-9]+/g, '-');",
+    "  return dashed.replace(/^-+|-+$/g, '');",
+    "}",
+  ].join("\n");
+  const Idiom = "func Health(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }";
+  const IdiomDoc = `package api\n${Idiom}\nfunc Ready(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }`;
+  const CopyDoc = `// utils\n${EvalDoc}\nexport const Other = 1;`;
+  const Result = Decontaminate([IdiomDoc, CopyDoc, "const unrelated = 42;"], [EvalDoc, "func HealthHandler(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); w.Write([]byte(\"ok\")) }"]);
+  expect(Result.Removed).toEqual([1]);
+  expect(Result.Kept).toEqual([0, 2]);
+});

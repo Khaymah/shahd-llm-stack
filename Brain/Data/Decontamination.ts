@@ -4,13 +4,17 @@
 
 import { CodePretokenize } from "../Tokenizer/CodePretokenizer.ts";
 
-// Code-aware windows (not a naive whitespace split): a code doc's real token boundaries are
-// identifiers/numbers/punctuation runs, so this matches the granularity contamination actually
-// leaks at (e.g. renamed-variable near-copies still share the same punctuation/number n-grams).
+// Code-aware WORD windows: the code pretokenizer finds the real token boundaries, then only
+// word-like tokens (identifiers, keywords, numbers) form the n-grams. Punctuation is dropped on
+// purpose: measured on a real corpus, 13-grams that kept punctuation removed 89 of 956 documents and
+// 74 of those matched one Go idiom, `(w http.ResponseWriter, r *http.Request) {` - an idiom every
+// handler shares, not leaked eval content. Thirteen consecutive WORDS shared with an eval doc is the
+// classic (GPT-3 / Phi) contamination signal and does not fire on idioms.
+const WordToken = /^[a-z0-9_$]{2,}$/;
 function WordNgrams(Text: string, N: number): Set<string> {
   const Toks = CodePretokenize(Text.toLowerCase())
     .map((T) => T.trim())
-    .filter((T) => T.length > 0);
+    .filter((T) => WordToken.test(T));
   const Out = new Set<string>();
   for (let I = 0; I + N <= Toks.length; I++) Out.add(Toks.slice(I, I + N).join(" "));
   return Out;

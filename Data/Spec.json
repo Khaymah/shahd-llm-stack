@@ -2,13 +2,58 @@
   "Version": "1",
   "Domain": "Web-dev coding assistant, taught as a curriculum: TS/JS core -> HTML/CSS (+ design systems) -> Go -> SQL/DB, with the docs that explain them.",
   "Slices": {
-    "ts": { "TargetMb": 300, "Langs": ["typescript"] },
-    "js": { "TargetMb": 120, "Langs": ["javascript"] },
-    "html": { "TargetMb": 40, "Langs": ["html", "vue", "svelte", "astro"] },
-    "css": { "TargetMb": 40, "Langs": ["css", "scss", "sass", "less"] },
-    "go": { "TargetMb": 150, "Langs": ["go"] },
-    "sql": { "TargetMb": 20, "Langs": ["sql"] },
-    "docs": { "TargetMb": 150, "Langs": ["text-en", "markdown"] }
+    "ts": {
+      "TargetMb": 300,
+      "Langs": [
+        "typescript"
+      ]
+    },
+    "js": {
+      "TargetMb": 120,
+      "Langs": [
+        "javascript"
+      ]
+    },
+    "html": {
+      "TargetMb": 40,
+      "Langs": [
+        "html",
+        "vue",
+        "svelte",
+        "astro"
+      ]
+    },
+    "css": {
+      "TargetMb": 40,
+      "Langs": [
+        "css",
+        "scss",
+        "sass",
+        "less"
+      ]
+    },
+    "go": {
+      "TargetMb": 150,
+      "Langs": [
+        "go"
+      ]
+    },
+    "sql": {
+      "TargetMb": 20,
+      "Langs": [
+        "sql"
+      ]
+    },
+    "docs": {
+      "TargetMb": 150,
+      "Langs": [
+        "text-en",
+        "markdown",
+        "text-knowledge",
+        "text",
+        "text-books"
+      ]
+    }
   },
   "Exclusions": {
     "MinFileBytes": 200,
@@ -41,113 +86,929 @@
       "**/SECURITY*"
     ]
   },
-  "Training": { "MaxEpochs": 4, "ContextTokens": 1024, "VocabSize": 16384 },
+  "Training": {
+    "MaxEpochs": 4,
+    "ContextTokens": 1024,
+    "VocabSize": 16384
+  },
   "Repos": [
-    { "Repo": "colinhacks/zod", "Slice": "ts", "Include": ["packages/zod/src/**"], "Note": "MIT. Schema validation, idiomatic generics and inference. Tests KEPT (v4 test suite is exemplary)." },
-    { "Repo": "honojs/hono", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. Web-standard router/middleware, small clean modules. Tests KEPT (co-located *.test.ts)." },
-    { "Repo": "drizzle-team/drizzle-orm", "Slice": "ts", "Include": ["drizzle-orm/src/**"], "Exclude": ["**/*.test.*", "**/tests/**"], "Note": "Apache-2.0. Type-safe SQL builder; dialect packages double as SQL knowledge." },
-    { "Repo": "trpc/trpc", "Slice": "ts", "Include": ["packages/server/src/**", "packages/client/src/**"], "Exclude": ["**/*.test.*", "**/__tests__/**"], "Note": "MIT. End-to-end typed RPC." },
-    { "Repo": "vitest-dev/vitest", "Slice": "ts", "Include": ["packages/vitest/src/**", "packages/expect/src/**", "packages/runner/src/**"], "Exclude": ["**/*.test.*"], "Note": "MIT. Test runner internals; teaches the testing vocabulary." },
-    { "Repo": "TanStack/query", "Slice": "ts", "Include": ["packages/query-core/src/**", "packages/react-query/src/**"], "Note": "MIT. Async state/cache. Tests KEPT (__tests__ are clear behavioural specs)." },
-    { "Repo": "date-fns/date-fns", "Slice": "ts", "Include": ["src/**"], "Exclude": ["src/locale/**", "src/fp/**"], "Note": "MIT. One function per folder with JSDoc. Tests KEPT (src/*/test.ts); locales and generated fp/ dropped." },
-    { "Repo": "immerjs/immer", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. Structural sharing via proxies; compact and well commented." },
-    { "Repo": "pmndrs/zustand", "Slice": "ts", "Include": ["src/**", "tests/**"], "Note": "MIT. Minimal store. Tests KEPT." },
-    { "Repo": "sindresorhus/ky", "Slice": "ts", "Include": ["source/**", "test/**"], "Note": "MIT. fetch wrapper, exemplary small library. Tests KEPT." },
-    { "Repo": "sinclairzx81/typebox", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. JSON Schema type builder; advanced type-level TS." },
-    { "Repo": "vuejs/core", "Slice": "ts", "Include": ["packages/*/src/**"], "Exclude": ["**/__tests__/**"], "Note": "MIT. Reactivity + compiler + runtime." },
-    { "Repo": "withastro/astro", "Slice": "ts", "Include": ["packages/astro/src/**"], "Exclude": ["**/*.test.*"], "Note": "MIT. Content-site framework core." },
-    { "Repo": "remix-run/react-router", "Slice": "ts", "Include": ["packages/react-router/lib/**"], "Exclude": ["**/__tests__/**", "**/*.test.*"], "Note": "MIT. Routing + data loading." },
-    { "Repo": "vercel/swr", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. Data fetching hooks." },
-    { "Repo": "elysiajs/elysia", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. Bun-first web framework (matches this repo's runtime)." },
-    { "Repo": "nestjs/nest", "Slice": "ts", "Include": ["packages/**"], "Exclude": ["**/test/**", "**/*.spec.ts"], "Note": "MIT. Decorator/DI architecture at scale." },
-    { "Repo": "kysely-org/kysely", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. Type-safe SQL query builder." },
-    { "Repo": "unjs/h3", "Slice": "ts", "Include": ["src/**"], "Note": "MIT. Minimal HTTP framework." },
-    { "Repo": "unjs/ofetch", "Slice": "ts", "Include": ["src/**", "test/**"], "Note": "MIT. fetch with retries/interceptors. Tests KEPT." },
-    { "Repo": "statelyai/xstate", "Slice": "ts", "Include": ["packages/core/src/**"], "Note": "MIT. State machines / actors." },
-    { "Repo": "denoland/std", "Slice": "ts", "Exclude": ["**/testdata/**", "_tools/**", "**/bench*"], "Note": "MIT. Deno standard library: idiomatic, documented, small modules. Tests KEPT (*_test.ts)." },
-    { "Repo": "vitejs/vite", "Slice": "ts", "Include": ["packages/vite/src/node/**"], "Exclude": ["**/__tests__/**"], "Note": "MIT. Dev server + build pipeline." },
-    { "Repo": "tailwindlabs/tailwindcss", "Slice": "ts", "Include": ["packages/tailwindcss/src/**"], "Exclude": ["**/*.test.*"], "Note": "MIT. v4 CSS compiler written in TS." },
-    { "Repo": "shoelace-style/shoelace", "Slice": "ts", "Include": ["src/components/**", "src/internal/**"], "Exclude": ["**/*.test.*"], "Note": "MIT. Lit web components; design-system code." },
-    { "Repo": "radix-ui/primitives", "Slice": "ts", "Include": ["packages/react/*/src/**"], "Exclude": ["**/*.test.*"], "Note": "MIT. Accessible headless components (tsx)." },
-    { "Repo": "chakra-ui/chakra-ui", "Slice": "ts", "Include": ["packages/react/src/**"], "Exclude": ["**/*.test.*", "**/__tests__/**"], "Note": "MIT. Design-system components + theming tokens." },
-    { "Repo": "shadcn-ui/ui", "Slice": "ts", "Include": ["apps/v4/registry/**"], "Note": "MIT. Copy-paste component registry (tsx). REVIEW PATHS: the registry layout moves between majors." },
-
-    { "Repo": "lodash/lodash", "Include": ["src/**"], "Exclude": ["**/*.spec.*"], "Note": "MIT. Default branch is the v5 rewrite; files land in js or ts by extension (no fixed Slice)." },
-    { "Repo": "axios/axios", "Slice": "js", "Include": ["lib/**"], "Note": "MIT. HTTP client, adapters, interceptors." },
-    { "Repo": "expressjs/express", "Slice": "js", "Include": ["index.js", "lib/**", "test/**"], "Note": "MIT. The classic Node web framework. Tests KEPT (mocha + supertest)." },
-    { "Repo": "iamkun/dayjs", "Slice": "js", "Include": ["src/**"], "Exclude": ["src/locale/**"], "Note": "MIT. Date library + plugin pattern; locales dropped." },
-    { "Repo": "ai/nanoid", "Slice": "js", "Exclude": ["test/**", "**/*.test.*"], "Note": "MIT. Tiny, carefully optimised ID generator." },
-    { "Repo": "chalk/chalk", "Slice": "js", "Include": ["source/**"], "Note": "MIT. Terminal styling, modern ESM." },
-    { "Repo": "preactjs/preact", "Slice": "js", "Include": ["src/**", "hooks/src/**", "compat/src/**"], "Note": "MIT. 3kB React-compatible VDOM." },
-    { "Repo": "alpinejs/alpine", "Slice": "js", "Include": ["packages/alpinejs/src/**"], "Note": "MIT. Declarative DOM reactivity." },
-    { "Repo": "d3/d3-array", "Slice": "js", "Include": ["src/**", "test/**"], "Note": "ISC. Small pure modules. Tests KEPT." },
-    { "Repo": "fastify/fastify", "Slice": "js", "Include": ["fastify.js", "lib/**", "test/**"], "Exclude": ["test/types/**"], "Note": "MIT. Fast Node framework (plain JS). Tests KEPT (node:test)." },
-    { "Repo": "pinojs/pino", "Slice": "js", "Include": ["pino.js", "lib/**"], "Note": "MIT. Structured logging." },
-    { "Repo": "sveltejs/svelte", "Slice": "js", "Include": ["packages/svelte/src/**"], "Exclude": ["**/*.test.*"], "Note": "MIT. Compiler + runtime written in JS with JSDoc types." },
-    { "Repo": "sindresorhus/execa", "Slice": "js", "Include": ["lib/**"], "Note": "MIT. Process execution done right." },
-    { "Repo": "knex/knex", "Slice": "js", "Include": ["lib/**"], "Note": "MIT. SQL query builder for many dialects." },
-    { "Repo": "nodejs/undici", "Slice": "js", "Include": ["lib/**"], "Note": "MIT. Node's HTTP/fetch implementation." },
-    { "Repo": "eslint/eslint", "Slice": "js", "Include": ["lib/**"], "Note": "MIT. Rules are small, documented AST visitors." },
-    { "Repo": "twbs/bootstrap", "Slice": "js", "Include": ["js/src/**"], "Note": "MIT. Component JS (ES modules)." },
-
-    { "Repo": "h5bp/html5-boilerplate", "Slice": "html", "Include": ["src/**"], "Note": "MIT. Reference HTML document skeleton (small)." },
-    { "Repo": "withastro/starlight", "Slice": "html", "Include": ["packages/starlight/components/**", "packages/starlight/user-components/**"], "Note": "MIT. Accessible .astro components." },
-    { "Repo": "withastro/astro", "Slice": "html", "Include": ["packages/astro/components/**", "examples/**"], "Note": "MIT. .astro components and starter examples (examples opted in by naming them)." },
-    { "Repo": "element-plus/element-plus", "Slice": "html", "Include": ["packages/components/**"], "Note": "MIT. Vue 3 SFC component library (.vue)." },
-    { "Repo": "primefaces/primevue", "Slice": "html", "Include": ["packages/primevue/src/**"], "Note": "MIT. Vue component library (.vue)." },
-    { "Repo": "nuxt/ui", "Slice": "html", "Include": ["src/runtime/components/**"], "Note": "MIT. Vue/Tailwind components (.vue)." },
-    { "Repo": "vitejs/vite", "Slice": "html", "Include": ["packages/create-vite/template-*/**"], "Note": "MIT. Starter templates: index.html, .vue, .svelte (small)." },
-
-    { "Repo": "tailwindlabs/tailwindcss", "Slice": "css", "Include": ["packages/tailwindcss/*.css"], "Note": "MIT. Preflight + theme tokens as CSS custom properties." },
-    { "Repo": "argyleink/open-props", "Slice": "css", "Include": ["src/**"], "Note": "MIT. Design tokens as CSS custom properties." },
-    { "Repo": "picocss/pico", "Slice": "css", "Include": ["scss/**"], "Note": "MIT. Semantic-HTML CSS framework (SCSS)." },
-    { "Repo": "necolas/normalize.css", "Slice": "css", "Include": ["normalize.css"], "Note": "MIT. The reference cross-browser reset (one well-commented file)." },
-    { "Repo": "twbs/bootstrap", "Slice": "css", "Include": ["scss/**"], "Exclude": ["scss/tests/**"], "Note": "MIT. SCSS architecture: maps, mixins, utilities API." },
-    { "Repo": "primer/css", "Slice": "css", "Include": ["src/**"], "Note": "MIT. GitHub's design system (SCSS)." },
-    { "Repo": "adobe/spectrum-css", "Slice": "css", "Include": ["components/**", "tokens/**"], "Exclude": ["**/stories/**"], "Note": "Apache-2.0. Adobe Spectrum components + tokens in plain CSS." },
-    { "Repo": "jgthms/bulma", "Slice": "css", "Include": ["sass/**"], "Note": "MIT. Flexbox CSS framework (Sass modules)." },
-    { "Repo": "radix-ui/themes", "Slice": "css", "Include": ["packages/radix-ui-themes/src/**"], "Note": "MIT. Component CSS + token scales (only .css kept by the slice)." },
-    { "Repo": "shoelace-style/shoelace", "Slice": "css", "Include": ["src/themes/**"], "Note": "MIT. Light/dark theme token sheets." },
-
-    { "Repo": "golang/go", "Slice": "go", "Ref": "master", "Include": ["src/net/http/**", "src/net/url/**", "src/strings/**", "src/bytes/**", "src/bufio/**", "src/io/**", "src/errors/**", "src/context/**", "src/sync/**", "src/sort/**", "src/slices/**", "src/maps/**", "src/fmt/**", "src/time/**", "src/encoding/json/**", "src/database/sql/**", "src/text/template/**", "src/html/template/**", "src/log/slog/**"], "Exclude": ["**/testdata/**"], "Note": "BSD-3-Clause. Standard-library packages a web dev uses daily (Include keeps the tarball walk small). Tests KEPT (*_test.go, Example functions)." },
-    { "Repo": "gin-gonic/gin", "Slice": "go", "Exclude": ["**/*_test.go", "**/testdata/**"], "Note": "MIT. The most common Go HTTP framework." },
-    { "Repo": "go-chi/chi", "Slice": "go", "Exclude": ["_examples/**", "**/testdata/**"], "Note": "MIT. net/http-compatible router; idiomatic middleware. Tests KEPT." },
-    { "Repo": "spf13/cobra", "Slice": "go", "Exclude": ["**/*_test.go", "site/**"], "Note": "Apache-2.0. CLI framework." },
-    { "Repo": "labstack/echo", "Slice": "go", "Exclude": ["**/*_test.go"], "Note": "MIT. HTTP framework." },
-    { "Repo": "go-gorm/gorm", "Slice": "go", "Exclude": ["**/*_test.go", "tests/**"], "Note": "MIT. ORM: callbacks, schema parsing, clauses." },
-    { "Repo": "gofiber/fiber", "Slice": "go", "Exclude": ["**/*_test.go", "**/testdata/**"], "Note": "MIT. Express-style Go framework." },
-    { "Repo": "uber-go/zap", "Slice": "go", "Exclude": ["**/*_test.go", "**/testdata/**"], "Note": "MIT. Allocation-conscious structured logging." },
-    { "Repo": "stretchr/testify", "Slice": "go", "Note": "MIT. Assertions/mocks; Tests KEPT (it is test tooling)." },
-    { "Repo": "charmbracelet/bubbletea", "Slice": "go", "Exclude": ["**/*_test.go"], "Note": "MIT. Elm-architecture TUI framework." },
-    { "Repo": "sqlc-dev/sqlc", "Slice": "go", "Include": ["internal/**"], "Exclude": ["internal/endtoend/**", "**/*_test.go"], "Note": "MIT. SQL -> typed Go code generator." },
-    { "Repo": "kelseyhightower/envconfig", "Slice": "go", "Note": "MIT. Small, classic reflection example. Tests KEPT." },
-    { "Repo": "jackc/pgx", "Slice": "go", "Exclude": ["**/*_test.go", "**/testdata/**"], "Note": "MIT. PostgreSQL driver: wire protocol, pooling." },
-    { "Repo": "google/uuid", "Slice": "go", "Note": "BSD-3-Clause. Small, idiomatic package. Tests KEPT." },
-    { "Repo": "pressly/goose", "Slice": "go", "Exclude": ["**/*_test.go", "**/testdata/**"], "Note": "MIT. Migration runner (Go side)." },
-
-    { "Repo": "sqlc-dev/sqlc", "Slice": "sql", "Include": ["examples/**", "internal/endtoend/testdata/**"], "Note": "MIT. Schemas + annotated queries across PostgreSQL/MySQL/SQLite. Some endtoend cases are deliberately invalid SQL (error tests) — acceptable noise." },
-    { "Repo": "launchbadge/sqlx", "Slice": "sql", "Include": ["examples/**/migrations/**", "tests/**/migrations/**", "tests/**/setup.sql"], "Note": "REVIEW LICENSE: dual MIT OR Apache-2.0; GitHub may report NOASSERTION and SpdxDetector may not accept a dual license, in which case the repo is skipped." },
-    { "Repo": "pressly/goose", "Slice": "sql", "Include": ["examples/**", "**/migrations/**"], "Note": "MIT. Up/down migration scripts." },
-    { "Repo": "jOOQ/sakila", "Slice": "sql", "Include": ["**/*.sql"], "Note": "REVIEW LICENSE (README states BSD). The Sakila sample schema in several dialects; data dumps exceed MaxFileBytes and drop out." },
-    { "Repo": "dbt-labs/jaffle_shop", "Slice": "sql", "Include": ["models/**"], "Note": "REVIEW LICENSE (believed Apache-2.0). Analytics SQL in dbt style (Jinja-templated)." },
-
-    { "Repo": "TanStack/query", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT. Guides + reference." },
-    { "Repo": "vitest-dev/vitest", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT. Testing guide + API." },
-    { "Repo": "trpc/trpc", "Slice": "docs", "Include": ["www/docs/**"], "Note": "MIT." },
-    { "Repo": "fastify/fastify", "Slice": "docs", "Include": ["docs/**", "README.md"], "Note": "MIT. Reference + guides." },
-    { "Repo": "kysely-org/kysely", "Slice": "docs", "Include": ["site/docs/**"], "Note": "MIT. SQL-builder recipes." },
-    { "Repo": "sveltejs/svelte", "Slice": "docs", "Include": ["documentation/docs/**"], "Note": "MIT." },
-    { "Repo": "remix-run/react-router", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT." },
-    { "Repo": "vitejs/vite", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT." },
-    { "Repo": "pmndrs/zustand", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT." },
-    { "Repo": "pinojs/pino", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT." },
-    { "Repo": "shoelace-style/shoelace", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT. Web-component + design-token docs." },
-    { "Repo": "spf13/cobra", "Slice": "docs", "Include": ["site/content/**", "README.md"], "Note": "Apache-2.0." },
-    { "Repo": "gin-gonic/gin", "Slice": "docs", "Include": ["docs/**", "README.md"], "Note": "MIT." },
-    { "Repo": "sqlc-dev/sqlc", "Slice": "docs", "Include": ["docs/**"], "Note": "MIT. SQL-first workflow (only .md files; .rst is not collected)." },
-    { "Repo": "charmbracelet/bubbletea", "Slice": "docs", "Include": ["tutorials/**", "README.md"], "Note": "MIT." },
-    { "Repo": "nestjs/docs.nestjs.com", "Slice": "docs", "Include": ["content/**"], "Note": "MIT. Architecture-heavy framework docs." },
-    { "Repo": "withastro/docs", "Slice": "docs", "Include": ["src/content/docs/en/**"], "Note": "REVIEW LICENSE (believed MIT). English docs only." },
-    { "Repo": "colinhacks/zod", "Slice": "docs", "Include": ["packages/docs/content/**", "README.md"], "Note": "MIT. REVIEW PATHS: docs moved into packages/docs with v4." }
+    {
+      "Repo": "colinhacks/zod",
+      "Slice": "ts",
+      "Include": [
+        "packages/zod/src/**"
+      ],
+      "Note": "MIT. Schema validation, idiomatic generics and inference. Tests KEPT (v4 test suite is exemplary)."
+    },
+    {
+      "Repo": "honojs/hono",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Web-standard router/middleware, small clean modules. Tests KEPT (co-located *.test.ts)."
+    },
+    {
+      "Repo": "drizzle-team/drizzle-orm",
+      "Slice": "ts",
+      "Include": [
+        "drizzle-orm/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*",
+        "**/tests/**"
+      ],
+      "Note": "Apache-2.0. Type-safe SQL builder; dialect packages double as SQL knowledge."
+    },
+    {
+      "Repo": "trpc/trpc",
+      "Slice": "ts",
+      "Include": [
+        "packages/server/src/**",
+        "packages/client/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*",
+        "**/__tests__/**"
+      ],
+      "Note": "MIT. End-to-end typed RPC."
+    },
+    {
+      "Repo": "vitest-dev/vitest",
+      "Slice": "ts",
+      "Include": [
+        "packages/vitest/src/**",
+        "packages/expect/src/**",
+        "packages/runner/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Test runner internals; teaches the testing vocabulary."
+    },
+    {
+      "Repo": "TanStack/query",
+      "Slice": "ts",
+      "Include": [
+        "packages/query-core/src/**",
+        "packages/react-query/src/**"
+      ],
+      "Note": "MIT. Async state/cache. Tests KEPT (__tests__ are clear behavioural specs)."
+    },
+    {
+      "Repo": "date-fns/date-fns",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Exclude": [
+        "src/locale/**",
+        "src/fp/**"
+      ],
+      "Note": "MIT. One function per folder with JSDoc. Tests KEPT (src/*/test.ts); locales and generated fp/ dropped."
+    },
+    {
+      "Repo": "immerjs/immer",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Structural sharing via proxies; compact and well commented."
+    },
+    {
+      "Repo": "pmndrs/zustand",
+      "Slice": "ts",
+      "Include": [
+        "src/**",
+        "tests/**"
+      ],
+      "Note": "MIT. Minimal store. Tests KEPT."
+    },
+    {
+      "Repo": "sindresorhus/ky",
+      "Slice": "ts",
+      "Include": [
+        "source/**",
+        "test/**"
+      ],
+      "Note": "MIT. fetch wrapper, exemplary small library. Tests KEPT."
+    },
+    {
+      "Repo": "sinclairzx81/typebox",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. JSON Schema type builder; advanced type-level TS."
+    },
+    {
+      "Repo": "vuejs/core",
+      "Slice": "ts",
+      "Include": [
+        "packages/*/src/**"
+      ],
+      "Exclude": [
+        "**/__tests__/**"
+      ],
+      "Note": "MIT. Reactivity + compiler + runtime."
+    },
+    {
+      "Repo": "withastro/astro",
+      "Slice": "ts",
+      "Include": [
+        "packages/astro/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Content-site framework core."
+    },
+    {
+      "Repo": "remix-run/react-router",
+      "Slice": "ts",
+      "Include": [
+        "packages/react-router/lib/**"
+      ],
+      "Exclude": [
+        "**/__tests__/**",
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Routing + data loading."
+    },
+    {
+      "Repo": "vercel/swr",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Data fetching hooks."
+    },
+    {
+      "Repo": "elysiajs/elysia",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Bun-first web framework (matches this repo's runtime)."
+    },
+    {
+      "Repo": "nestjs/nest",
+      "Slice": "ts",
+      "Include": [
+        "packages/**"
+      ],
+      "Exclude": [
+        "**/test/**",
+        "**/*.spec.ts"
+      ],
+      "Note": "MIT. Decorator/DI architecture at scale."
+    },
+    {
+      "Repo": "kysely-org/kysely",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Type-safe SQL query builder."
+    },
+    {
+      "Repo": "unjs/h3",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Minimal HTTP framework."
+    },
+    {
+      "Repo": "unjs/ofetch",
+      "Slice": "ts",
+      "Include": [
+        "src/**",
+        "test/**"
+      ],
+      "Note": "MIT. fetch with retries/interceptors. Tests KEPT."
+    },
+    {
+      "Repo": "statelyai/xstate",
+      "Slice": "ts",
+      "Include": [
+        "packages/core/src/**"
+      ],
+      "Note": "MIT. State machines / actors."
+    },
+    {
+      "Repo": "denoland/std",
+      "Slice": "ts",
+      "Exclude": [
+        "**/testdata/**",
+        "_tools/**",
+        "**/bench*"
+      ],
+      "Note": "MIT. Deno standard library: idiomatic, documented, small modules. Tests KEPT (*_test.ts)."
+    },
+    {
+      "Repo": "vitejs/vite",
+      "Slice": "ts",
+      "Include": [
+        "packages/vite/src/node/**"
+      ],
+      "Exclude": [
+        "**/__tests__/**"
+      ],
+      "Note": "MIT. Dev server + build pipeline."
+    },
+    {
+      "Repo": "tailwindlabs/tailwindcss",
+      "Slice": "ts",
+      "Include": [
+        "packages/tailwindcss/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*"
+      ],
+      "Note": "MIT. v4 CSS compiler written in TS."
+    },
+    {
+      "Repo": "shoelace-style/shoelace",
+      "Slice": "ts",
+      "Include": [
+        "src/components/**",
+        "src/internal/**"
+      ],
+      "Exclude": [
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Lit web components; design-system code."
+    },
+    {
+      "Repo": "radix-ui/primitives",
+      "Slice": "ts",
+      "Include": [
+        "packages/react/*/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Accessible headless components (tsx)."
+    },
+    {
+      "Repo": "chakra-ui/chakra-ui",
+      "Slice": "ts",
+      "Include": [
+        "packages/react/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*",
+        "**/__tests__/**"
+      ],
+      "Note": "MIT. Design-system components + theming tokens."
+    },
+    {
+      "Repo": "shadcn-ui/ui",
+      "Slice": "ts",
+      "Include": [
+        "apps/v4/registry/**"
+      ],
+      "Note": "MIT. Copy-paste component registry (tsx). REVIEW PATHS: the registry layout moves between majors."
+    },
+    {
+      "Repo": "lodash/lodash",
+      "Include": [
+        "src/**"
+      ],
+      "Exclude": [
+        "**/*.spec.*"
+      ],
+      "Note": "MIT. Default branch is the v5 rewrite; files land in js or ts by extension (no fixed Slice)."
+    },
+    {
+      "Repo": "axios/axios",
+      "Slice": "js",
+      "Include": [
+        "lib/**"
+      ],
+      "Note": "MIT. HTTP client, adapters, interceptors."
+    },
+    {
+      "Repo": "expressjs/express",
+      "Slice": "js",
+      "Include": [
+        "index.js",
+        "lib/**",
+        "test/**"
+      ],
+      "Note": "MIT. The classic Node web framework. Tests KEPT (mocha + supertest)."
+    },
+    {
+      "Repo": "iamkun/dayjs",
+      "Slice": "js",
+      "Include": [
+        "src/**"
+      ],
+      "Exclude": [
+        "src/locale/**"
+      ],
+      "Note": "MIT. Date library + plugin pattern; locales dropped."
+    },
+    {
+      "Repo": "ai/nanoid",
+      "Slice": "js",
+      "Exclude": [
+        "test/**",
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Tiny, carefully optimised ID generator."
+    },
+    {
+      "Repo": "chalk/chalk",
+      "Slice": "js",
+      "Include": [
+        "source/**"
+      ],
+      "Note": "MIT. Terminal styling, modern ESM."
+    },
+    {
+      "Repo": "preactjs/preact",
+      "Slice": "js",
+      "Include": [
+        "src/**",
+        "hooks/src/**",
+        "compat/src/**"
+      ],
+      "Note": "MIT. 3kB React-compatible VDOM."
+    },
+    {
+      "Repo": "alpinejs/alpine",
+      "Slice": "js",
+      "Include": [
+        "packages/alpinejs/src/**"
+      ],
+      "Note": "MIT. Declarative DOM reactivity."
+    },
+    {
+      "Repo": "d3/d3-array",
+      "Slice": "js",
+      "Include": [
+        "src/**",
+        "test/**"
+      ],
+      "Note": "ISC. Small pure modules. Tests KEPT."
+    },
+    {
+      "Repo": "fastify/fastify",
+      "Slice": "js",
+      "Include": [
+        "fastify.js",
+        "lib/**",
+        "test/**"
+      ],
+      "Exclude": [
+        "test/types/**"
+      ],
+      "Note": "MIT. Fast Node framework (plain JS). Tests KEPT (node:test)."
+    },
+    {
+      "Repo": "pinojs/pino",
+      "Slice": "js",
+      "Include": [
+        "pino.js",
+        "lib/**"
+      ],
+      "Note": "MIT. Structured logging."
+    },
+    {
+      "Repo": "sveltejs/svelte",
+      "Slice": "js",
+      "Include": [
+        "packages/svelte/src/**"
+      ],
+      "Exclude": [
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Compiler + runtime written in JS with JSDoc types."
+    },
+    {
+      "Repo": "sindresorhus/execa",
+      "Slice": "js",
+      "Include": [
+        "lib/**"
+      ],
+      "Note": "MIT. Process execution done right."
+    },
+    {
+      "Repo": "knex/knex",
+      "Slice": "js",
+      "Include": [
+        "lib/**"
+      ],
+      "Note": "MIT. SQL query builder for many dialects."
+    },
+    {
+      "Repo": "nodejs/undici",
+      "Slice": "js",
+      "Include": [
+        "lib/**"
+      ],
+      "Note": "MIT. Node's HTTP/fetch implementation."
+    },
+    {
+      "Repo": "eslint/eslint",
+      "Slice": "js",
+      "Include": [
+        "lib/**"
+      ],
+      "Note": "MIT. Rules are small, documented AST visitors."
+    },
+    {
+      "Repo": "twbs/bootstrap",
+      "Slice": "js",
+      "Include": [
+        "js/src/**"
+      ],
+      "Note": "MIT. Component JS (ES modules)."
+    },
+    {
+      "Repo": "h5bp/html5-boilerplate",
+      "Slice": "html",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Reference HTML document skeleton (small)."
+    },
+    {
+      "Repo": "withastro/starlight",
+      "Slice": "html",
+      "Include": [
+        "packages/starlight/components/**",
+        "packages/starlight/user-components/**"
+      ],
+      "Note": "MIT. Accessible .astro components."
+    },
+    {
+      "Repo": "withastro/astro",
+      "Slice": "html",
+      "Include": [
+        "packages/astro/components/**",
+        "examples/**"
+      ],
+      "Note": "MIT. .astro components and starter examples (examples opted in by naming them)."
+    },
+    {
+      "Repo": "element-plus/element-plus",
+      "Slice": "html",
+      "Include": [
+        "packages/components/**"
+      ],
+      "Note": "MIT. Vue 3 SFC component library (.vue)."
+    },
+    {
+      "Repo": "primefaces/primevue",
+      "Slice": "html",
+      "Include": [
+        "packages/primevue/src/**"
+      ],
+      "Note": "MIT. Vue component library (.vue)."
+    },
+    {
+      "Repo": "nuxt/ui",
+      "Slice": "html",
+      "Include": [
+        "src/runtime/components/**"
+      ],
+      "Note": "MIT. Vue/Tailwind components (.vue)."
+    },
+    {
+      "Repo": "vitejs/vite",
+      "Slice": "html",
+      "Include": [
+        "packages/create-vite/template-*/**"
+      ],
+      "Note": "MIT. Starter templates: index.html, .vue, .svelte (small)."
+    },
+    {
+      "Repo": "tailwindlabs/tailwindcss",
+      "Slice": "css",
+      "Include": [
+        "packages/tailwindcss/*.css"
+      ],
+      "Note": "MIT. Preflight + theme tokens as CSS custom properties."
+    },
+    {
+      "Repo": "argyleink/open-props",
+      "Slice": "css",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Design tokens as CSS custom properties."
+    },
+    {
+      "Repo": "picocss/pico",
+      "Slice": "css",
+      "Include": [
+        "scss/**"
+      ],
+      "Note": "MIT. Semantic-HTML CSS framework (SCSS)."
+    },
+    {
+      "Repo": "necolas/normalize.css",
+      "Slice": "css",
+      "Include": [
+        "normalize.css"
+      ],
+      "Note": "MIT. The reference cross-browser reset (one well-commented file)."
+    },
+    {
+      "Repo": "twbs/bootstrap",
+      "Slice": "css",
+      "Include": [
+        "scss/**"
+      ],
+      "Exclude": [
+        "scss/tests/**"
+      ],
+      "Note": "MIT. SCSS architecture: maps, mixins, utilities API."
+    },
+    {
+      "Repo": "primer/css",
+      "Slice": "css",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. GitHub's design system (SCSS)."
+    },
+    {
+      "Repo": "adobe/spectrum-css",
+      "Slice": "css",
+      "Include": [
+        "components/**",
+        "tokens/**"
+      ],
+      "Exclude": [
+        "**/stories/**"
+      ],
+      "Note": "Apache-2.0. Adobe Spectrum components + tokens in plain CSS."
+    },
+    {
+      "Repo": "jgthms/bulma",
+      "Slice": "css",
+      "Include": [
+        "sass/**"
+      ],
+      "Note": "MIT. Flexbox CSS framework (Sass modules)."
+    },
+    {
+      "Repo": "radix-ui/themes",
+      "Slice": "css",
+      "Include": [
+        "packages/radix-ui-themes/src/**"
+      ],
+      "Note": "MIT. Component CSS + token scales (only .css kept by the slice)."
+    },
+    {
+      "Repo": "shoelace-style/shoelace",
+      "Slice": "css",
+      "Include": [
+        "src/themes/**"
+      ],
+      "Note": "MIT. Light/dark theme token sheets."
+    },
+    {
+      "Repo": "golang/go",
+      "Slice": "go",
+      "Ref": "master",
+      "Include": [
+        "src/net/http/**",
+        "src/net/url/**",
+        "src/strings/**",
+        "src/bytes/**",
+        "src/bufio/**",
+        "src/io/**",
+        "src/errors/**",
+        "src/context/**",
+        "src/sync/**",
+        "src/sort/**",
+        "src/slices/**",
+        "src/maps/**",
+        "src/fmt/**",
+        "src/time/**",
+        "src/encoding/json/**",
+        "src/database/sql/**",
+        "src/text/template/**",
+        "src/html/template/**",
+        "src/log/slog/**"
+      ],
+      "Exclude": [
+        "**/testdata/**"
+      ],
+      "Note": "BSD-3-Clause. Standard-library packages a web dev uses daily (Include keeps the tarball walk small). Tests KEPT (*_test.go, Example functions)."
+    },
+    {
+      "Repo": "gin-gonic/gin",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. The most common Go HTTP framework."
+    },
+    {
+      "Repo": "go-chi/chi",
+      "Slice": "go",
+      "Exclude": [
+        "_examples/**",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. net/http-compatible router; idiomatic middleware. Tests KEPT."
+    },
+    {
+      "Repo": "spf13/cobra",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "site/**"
+      ],
+      "Note": "Apache-2.0. CLI framework."
+    },
+    {
+      "Repo": "labstack/echo",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go"
+      ],
+      "Note": "MIT. HTTP framework."
+    },
+    {
+      "Repo": "go-gorm/gorm",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "tests/**"
+      ],
+      "Note": "MIT. ORM: callbacks, schema parsing, clauses."
+    },
+    {
+      "Repo": "gofiber/fiber",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. Express-style Go framework."
+    },
+    {
+      "Repo": "uber-go/zap",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. Allocation-conscious structured logging."
+    },
+    {
+      "Repo": "stretchr/testify",
+      "Slice": "go",
+      "Note": "MIT. Assertions/mocks; Tests KEPT (it is test tooling)."
+    },
+    {
+      "Repo": "charmbracelet/bubbletea",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go"
+      ],
+      "Note": "MIT. Elm-architecture TUI framework."
+    },
+    {
+      "Repo": "sqlc-dev/sqlc",
+      "Slice": "go",
+      "Include": [
+        "internal/**"
+      ],
+      "Exclude": [
+        "internal/endtoend/**",
+        "**/*_test.go"
+      ],
+      "Note": "MIT. SQL -> typed Go code generator."
+    },
+    {
+      "Repo": "kelseyhightower/envconfig",
+      "Slice": "go",
+      "Note": "MIT. Small, classic reflection example. Tests KEPT."
+    },
+    {
+      "Repo": "jackc/pgx",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. PostgreSQL driver: wire protocol, pooling."
+    },
+    {
+      "Repo": "google/uuid",
+      "Slice": "go",
+      "Note": "BSD-3-Clause. Small, idiomatic package. Tests KEPT."
+    },
+    {
+      "Repo": "pressly/goose",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. Migration runner (Go side)."
+    },
+    {
+      "Repo": "sqlc-dev/sqlc",
+      "Slice": "sql",
+      "Include": [
+        "examples/**",
+        "internal/endtoend/testdata/**"
+      ],
+      "Note": "MIT. Schemas + annotated queries across PostgreSQL/MySQL/SQLite. Some endtoend cases are deliberately invalid SQL (error tests) — acceptable noise."
+    },
+    {
+      "Repo": "launchbadge/sqlx",
+      "Slice": "sql",
+      "Include": [
+        "examples/**/migrations/**",
+        "tests/**/migrations/**",
+        "tests/**/setup.sql"
+      ],
+      "Note": "REVIEW LICENSE: dual MIT OR Apache-2.0; GitHub may report NOASSERTION and SpdxDetector may not accept a dual license, in which case the repo is skipped."
+    },
+    {
+      "Repo": "pressly/goose",
+      "Slice": "sql",
+      "Include": [
+        "examples/**",
+        "**/migrations/**"
+      ],
+      "Note": "MIT. Up/down migration scripts."
+    },
+    {
+      "Repo": "jOOQ/sakila",
+      "Slice": "sql",
+      "Include": [
+        "**/*.sql"
+      ],
+      "Note": "REVIEW LICENSE (README states BSD). The Sakila sample schema in several dialects; data dumps exceed MaxFileBytes and drop out."
+    },
+    {
+      "Repo": "dbt-labs/jaffle_shop",
+      "Slice": "sql",
+      "Include": [
+        "models/**"
+      ],
+      "Note": "REVIEW LICENSE (believed Apache-2.0). Analytics SQL in dbt style (Jinja-templated)."
+    },
+    {
+      "Repo": "TanStack/query",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT. Guides + reference."
+    },
+    {
+      "Repo": "vitest-dev/vitest",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT. Testing guide + API."
+    },
+    {
+      "Repo": "trpc/trpc",
+      "Slice": "docs",
+      "Include": [
+        "www/docs/**"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "fastify/fastify",
+      "Slice": "docs",
+      "Include": [
+        "docs/**",
+        "README.md"
+      ],
+      "Note": "MIT. Reference + guides."
+    },
+    {
+      "Repo": "kysely-org/kysely",
+      "Slice": "docs",
+      "Include": [
+        "site/docs/**"
+      ],
+      "Note": "MIT. SQL-builder recipes."
+    },
+    {
+      "Repo": "sveltejs/svelte",
+      "Slice": "docs",
+      "Include": [
+        "documentation/docs/**"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "remix-run/react-router",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "vitejs/vite",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "pmndrs/zustand",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "pinojs/pino",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "shoelace-style/shoelace",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT. Web-component + design-token docs."
+    },
+    {
+      "Repo": "spf13/cobra",
+      "Slice": "docs",
+      "Include": [
+        "site/content/**",
+        "README.md"
+      ],
+      "Note": "Apache-2.0."
+    },
+    {
+      "Repo": "gin-gonic/gin",
+      "Slice": "docs",
+      "Include": [
+        "docs/**",
+        "README.md"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "sqlc-dev/sqlc",
+      "Slice": "docs",
+      "Include": [
+        "docs/**"
+      ],
+      "Note": "MIT. SQL-first workflow (only .md files; .rst is not collected)."
+    },
+    {
+      "Repo": "charmbracelet/bubbletea",
+      "Slice": "docs",
+      "Include": [
+        "tutorials/**",
+        "README.md"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "nestjs/docs.nestjs.com",
+      "Slice": "docs",
+      "Include": [
+        "content/**"
+      ],
+      "Note": "MIT. Architecture-heavy framework docs."
+    },
+    {
+      "Repo": "withastro/docs",
+      "Slice": "docs",
+      "Include": [
+        "src/content/docs/en/**"
+      ],
+      "Note": "REVIEW LICENSE (believed MIT). English docs only."
+    },
+    {
+      "Repo": "colinhacks/zod",
+      "Slice": "docs",
+      "Include": [
+        "packages/docs/content/**",
+        "README.md"
+      ],
+      "Note": "MIT. REVIEW PATHS: docs moved into packages/docs with v4."
+    }
   ]
 }

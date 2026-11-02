@@ -8,7 +8,8 @@ const Spec = LoadDataSpec(DefaultDataSpecPath);
 // Extensions the curriculum covers; every code Lang in the spec must be produced by one of them, so a
 // typo ("typescipt") or a tag CodeFileFilter never emits can't silently collect nothing.
 const ProbeExtensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs", "html", "htm", "vue", "svelte", "astro", "css", "scss", "sass", "less", "go", "sql", "md", "mdx"];
-const ProseLangs: readonly string[] = ["text-en", MarkdownLang];
+// "text*" tags come from the folder provider / dashboard kind routing (LocalFolderProvider, KindRouting).
+const ProseLangs: readonly string[] = ["text-en", MarkdownLang, "text", "text-knowledge", "text-books"];
 // Repos the licensing policy rules out (Data/Spec.md explains each) — they must never creep back in.
 const PolicyExcludedRepos: readonly string[] = ["mdn/content", "oven-sh/bun", "tailwindlabs/tailwindcss.com", "microsoft/TypeScript-Website"];
 

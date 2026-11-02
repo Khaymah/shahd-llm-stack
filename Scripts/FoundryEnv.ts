@@ -5,6 +5,7 @@
 
 import { InMemoryDocumentStore } from "../Foundry/FoundryBarrel.ts";
 import type { DocumentStore } from "../Foundry/FoundryBarrel.ts";
+import { TableForKind } from "../Foundry/DataKinds.ts";
 import { PostgresDocumentStore } from "../Foundry/PostgresDocumentStore.ts";
 import { FoundryStores } from "../Foundry/FoundryStores.ts";
 import { ResolveCheckpointDir } from "../Foundry/PostgresCheckpointStore.ts";
@@ -32,7 +33,9 @@ export function BraveKey(): string | undefined {
 /** Store: --Store CLI > FOUNDRY_STORE env > (DATABASE_URL present ? postgres : memory). */
 export function ResolveStore(): { Store: DocumentStore; Kind: string } {
   const Choice = ReadArg("--Store=", "") || process.env["FOUNDRY_STORE"] || (process.env["DATABASE_URL"] !== undefined ? "postgres" : "memory");
-  if (Choice === "postgres") return { Store: new PostgresDocumentStore(DatabaseUrl()), Kind: "postgres" };
+  // Postgres: the per-kind `code` table. Training and the dashboard read documents_<kind>; the legacy
+  // `documents` table is only ever a migration source (Scripts/MigrateKinds.ts).
+  if (Choice === "postgres") return { Store: new PostgresDocumentStore(DatabaseUrl(), TableForKind("code")), Kind: "postgres" };
   return { Store: new InMemoryDocumentStore(), Kind: "memory" };
 }
 

@@ -74,6 +74,9 @@ export function NormalizeSearch(Search: string | undefined): string | null {
 }
 
 export interface DocumentStore {
+  /** Release held connections (Postgres). Optional: the in-memory store has nothing to close. A CLI
+   *  that forgets this never exits — Bun keeps running while the pool's sockets are open. */
+  Close?(): Promise<void>;
   /** Insert a document by Id (content hash) if it is not already stored. Returns true if the row was
    *  NEWLY inserted, false if it already existed — in which case the stored row is left untouched
    *  (first-seen provenance wins; re-collecting the same bytes never rewrites source/provenance).
