@@ -28,6 +28,7 @@ import type { TokenGenerator } from "../Safety/GuardedGenerate.ts";
 import { RenderChatToIds, ChatTokens } from "../Sft/ChatTemplate.ts";
 import type { ChatMessage, ChatRole } from "../Sft/ChatTemplate.ts";
 import { RenderMessages } from "./RenderChat.ts";
+import { ThinkRouter, SplitThinkingText } from "./ThinkRouter.ts";
 import type { RenderableMessage } from "./RenderChat.ts";
 
 export type ChatHandler = (Req: Request) => Promise<Response>;
@@ -162,6 +163,12 @@ async function RunGuardedGeneration(G: GenerationRequest): Promise<GenerationOut
   };
 }
 
+// The scratchpad never ships as `content`: it goes out as `reasoning` (omitted when empty).
+function AssistantMessage(Text: string): Record<string, string> {
+  const Split = SplitThinkingText(Text);
+  return Split.Reasoning.length > 0 ? { role: "assistant", content: Split.Content, reasoning: Split.Reasoning } : { role: "assistant", content: Split.Content };
+}
+
 function ErrorResponse(Status: number, Message: string, Headers?: Record<string, string>): Response {
   return Response.json({ error: Message }, { status: Status, headers: Headers });
 }
@@ -223,7 +230,7 @@ export function CreateChatHandler(Model: Shahd, Tok: Tokenizer, Config: Resolved
           object: "chat.completion",
           created: Created,
           model: ModelId,
-          choices: [{ index: 0, message: { role: "assistant", content: Outcome.Text }, finish_reason: Outcome.FinishReason }],
+          choices: [{ index: 0, message: AssistantMessage(Outcome.Text), finish_reason: Outcome.FinishReason }],
           usage: { prompt_tokens: Outcome.PromptTokens, completion_tokens: Outcome.CompletionTokens, total_tokens: Outcome.PromptTokens + Outcome.CompletionTokens },
         });
       } catch (Err) {
@@ -259,11 +266,17 @@ export function CreateChatHandler(Model: Shahd, Tok: Tokenizer, Config: Resolved
         const Run = async (): Promise<void> => {
           try {
             Send(Chunk({ role: "assistant" }, null));
+            const Router = new ThinkRouter();
+            const SendRouted = (Routed: { Content: string; Reasoning: string }): void => {
+              if (Routed.Reasoning.length > 0) Send(Chunk({ reasoning: Routed.Reasoning }, null));
+              if (Routed.Content.length > 0) Send(Chunk({ content: Routed.Content }, null));
+            };
             const Outcome = await RunGuardedGeneration({
               ...Base,
-              OnDelta: (Delta) => Send(Chunk({ content: Delta }, null)),
+              OnDelta: (Delta) => SendRouted(Router.Push(Delta)),
               ShouldStop: () => Cancelled || Req.signal.aborted,
             });
+            SendRouted(Router.Flush());
             Send(Chunk({}, Outcome.FinishReason));
           } catch (Err) {
             Send({ error: PublicFailure(Err, RequestId).Message });

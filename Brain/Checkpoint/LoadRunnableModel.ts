@@ -38,6 +38,9 @@ function NonDefaultPolicy(Config: ShahdConfig): string[] {
     const Defaults = DefaultConfig[Section] as Record<string, unknown>;
     if (Carried === undefined) continue;
     for (const Key of Object.keys(Carried)) {
+      // Compute.Precision records how the weights were trained/stored - a property of the artifact,
+      // not an operator policy - so it is stripped silently rather than reported as "ignored policy".
+      if (Section === "Compute" && Key === "Precision") continue;
       if (JSON.stringify(Carried[Key]) !== JSON.stringify(Defaults[Key])) Found.push(`${Section}.${Key}=${JSON.stringify(Carried[Key])}`);
     }
   }

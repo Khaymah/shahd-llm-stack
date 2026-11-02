@@ -299,3 +299,27 @@ test("SSE: output blocked mid-stream is never delivered; the stream ends with th
     console.warn = Original;
   }
 });
+
+// The OpenAI surface never leaks the <|think|> scratchpad into `content`: it is split out as
+// `reasoning`, both in the JSON reply and as separate streaming deltas (markers may be cut by a delta).
+import { ThinkRouter, SplitThinkingText } from "../Brain/Serving/ThinkRouter.ts";
+test("ThinkRouter splits scratchpad from answer across arbitrary delta boundaries", () => {
+  const Full = "<|think|>The user greeted me.<|endthink|>Hi there!<|think|>again<|endthink|> Bye.";
+  for (const Size of [1, 2, 3, 5, 7, 11, 64]) {
+    const Router = new ThinkRouter();
+    let Content = "";
+    let Reasoning = "";
+    for (let I = 0; I < Full.length; I += Size) {
+      const Out = Router.Push(Full.slice(I, I + Size));
+      Content += Out.Content;
+      Reasoning += Out.Reasoning;
+    }
+    const Tail = Router.Flush();
+    Content += Tail.Content;
+    Reasoning += Tail.Reasoning;
+    expect(Content).toBe("Hi there! Bye.");
+    expect(Reasoning).toBe("The user greeted me.again");
+  }
+  expect(SplitThinkingText("plain <| not a marker")).toEqual({ Content: "plain <| not a marker", Reasoning: "" });
+  expect(SplitThinkingText("<|think|>unclosed")).toEqual({ Content: "", Reasoning: "unclosed" });
+});
