@@ -3,6 +3,8 @@
 #   ingest-spec (Data/Spec.ci.json, GITHUB_TOKEN) -> train:bpe -> pretrain (epoch-capped) -> SFT
 #   -> eval (Meta.Eval written into the checkpoint) -> artifact.
 # The runner has 4 vCPUs and a 6 h job limit; the CI spec is sized so a run finishes in ~1 h.
+# Note: "Run workflow" (workflow_dispatch) appears only once this file is on the default branch; a
+# `model-v*` tag runs it from any branch (and -rc/-alpha/-beta tags publish a pre-release).
 name: Train model
 
 on:
@@ -135,4 +137,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/model-v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${GITHUB_REF_NAME}" Release/* --title "${MODEL_NAME} ${GITHUB_REF_NAME}" --notes-file Release/README.md
+        run: |
+          PRE=""; case "$GITHUB_REF_NAME" in *-rc*|*-alpha*|*-beta*) PRE="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" Release/* $PRE --title "$MODEL_NAME $GITHUB_REF_NAME" --notes-file Release/README.md
