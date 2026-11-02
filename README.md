@@ -62,9 +62,12 @@ per-reply persisted reasoning): [Docs/screenshots/shahd-chat-full-conversation.p
 The **Train model** workflow (`.github/workflows/train-model.yml`) runs the whole pipeline on a GitHub
 runner — collect the CI corpus from `Data/Spec.ci.json` (explicit permissive repos, `GITHUB_TOKEN`),
 train the tokenizer, pretrain under the epoch cap, SFT, evaluate — and publishes the checkpoints,
-tokenizer, eval reports and a model card as a workflow artifact (about an hour for the 3M-parameter
-CI tier). Start it from **Actions → Train model → Run workflow** (inputs: epochs, embed, layers, SFT
-steps, name), or push a `model-v*` tag to also publish a GitHub Release. Then:
+tokenizer, eval reports and a model card as a workflow artifact. Sizes come from a profile in
+`Data/TrainProfiles/`: `ci` (~2M params, ~8 MB, ~35 min) and `micro` (~6.6M params, ~32 MB, ~4.5 h,
+pretrain time-capped so the job always finishes). Start it from **Actions → Train model → Run
+workflow** (pick a profile, optionally override epochs/embed/layers/SFT steps/name), push a
+`model/<profile>-<anything>` branch, or push a `model-<profile>-v<version>` tag (`model-v*` = `ci`)
+to also publish a GitHub Release. Then:
 
 ```bash
 bun run serve --Checkpoint=Checkpoints/CiChat.ckpt      # OpenAI-compatible API on 127.0.0.1:8080

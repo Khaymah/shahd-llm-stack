@@ -1,34 +1,44 @@
-# Train a small Shahd model end-to-end on a GitHub runner and publish it as a downloadable artifact
-# (and as a GitHub Release when run on a `model-v*` tag). Same pipeline a developer runs locally:
-#   ingest-spec (Data/Spec.ci.json, GITHUB_TOKEN) -> train:bpe -> pretrain (epoch-capped) -> SFT
-#   -> eval (Meta.Eval written into the checkpoint) -> artifact.
-# The runner has 4 vCPUs and a 6 h job limit; the CI spec is sized so a run finishes in ~1 h.
-# Note: "Run workflow" (workflow_dispatch) appears only once this file is on the default branch; a
-# `model-v*` tag runs it from any branch (and -rc/-alpha/-beta tags publish a pre-release), and so
-# does a push to a `model/**` branch (artifact only, no release).
+# Train a Shahd model end-to-end on a GitHub runner and publish it as a downloadable artifact (and as a
+# GitHub Release when run on a `model-*v*` tag). Same pipeline a developer runs locally:
+#   ingest-spec -> train:bpe -> pretrain (epoch-capped, time-capped) -> SFT -> eval -> artifact.
+#
+# Sizes come from a training profile in Data/TrainProfiles/<profile>.json (spec, width, depth, epochs,
+# SFT steps, name, pretrain time cap). The profile is picked, in order, from:
+#   - the `profile` input of a manual run (Actions -> Train model -> Run workflow),
+#   - the branch name `model/<profile>-<anything>` (e.g. model/micro-rc1),
+#   - the tag name `model-<profile>-v<version>` (e.g. model-micro-v0.3.0; `model-v*` = the ci profile),
+#   - otherwise `ci`.
+# Manual-run inputs left empty fall back to the profile's values.
+#
+# The runner has 4 vCPUs and a 6 h job limit. `ci` finishes in ~35 min; `micro` is sized to ~4.5 h and
+# its pretrain stops gracefully at PretrainMinutes (checkpoint saved at the exact step) so the SFT and
+# eval steps always get their time. "Run workflow" appears once this file is on the default branch.
 name: Train model
 
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: "Training profile from Data/TrainProfiles (ci, micro)"
+        default: "ci"
       epochs:
-        description: "Pretraining epochs over the unique tokens (<= Spec MaxEpochs; 2 = the memorisation-safe default)"
-        default: "2"
+        description: "Override: pretraining epochs (empty = profile)"
+        default: ""
       embed:
-        description: "Embedding width (128 = CI tier; 192/256 need the 6 h budget)"
-        default: "128"
+        description: "Override: embedding width (empty = profile)"
+        default: ""
       layers:
-        description: "Transformer layers"
-        default: "4"
+        description: "Override: transformer layers (empty = profile)"
+        default: ""
       sft_steps:
-        description: "SFT steps from the pretrained base"
-        default: "400"
+        description: "Override: SFT steps (empty = profile)"
+        default: ""
       name:
-        description: "Model name (checkpoint + artifact)"
-        default: "CiChat"
+        description: "Override: model name (empty = profile)"
+        default: ""
   push:
-    tags: ["model-v*"] # also publishes a GitHub Release
-    branches: ["model/**"] # a `model/<name>` branch trains and uploads the artifact only
+    tags: ["model-v*", "model-*-v*"] # also publishes a GitHub Release
+    branches: ["model/**"] # trains and uploads the artifact only
 
 concurrency:
   group: train-model-${{ github.ref }}
@@ -36,20 +46,14 @@ concurrency:
 
 env:
   DATABASE_URL: postgres://shahd:shahd@localhost:5432/shahd
-  FOUNDRY_SPEC: Data/Spec.ci.json
-  MODEL_NAME: ${{ github.event.inputs.name || 'CiChat' }}
-  EPOCHS: ${{ github.event.inputs.epochs || '2' }}
-  EMBED: ${{ github.event.inputs.embed || '128' }}
-  LAYERS: ${{ github.event.inputs.layers || '4' }}
-  SFT_STEPS: ${{ github.event.inputs.sft_steps || '400' }}
 
 jobs:
   train:
     name: ingest → tokenizer → pretrain → SFT → eval
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 355
     permissions:
-      contents: write # release upload on model-v* tags
+      contents: write # release upload on model tags
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -65,6 +69,42 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve the training profile
+        env:
+          IN_PROFILE: ${{ github.event.inputs.profile }}
+          IN_EPOCHS: ${{ github.event.inputs.epochs }}
+          IN_EMBED: ${{ github.event.inputs.embed }}
+          IN_LAYERS: ${{ github.event.inputs.layers }}
+          IN_SFT: ${{ github.event.inputs.sft_steps }}
+          IN_NAME: ${{ github.event.inputs.name }}
+        run: |
+          PROFILE="$IN_PROFILE"
+          if [ -z "$PROFILE" ]; then
+            case "$GITHUB_REF" in
+              refs/heads/model/*) PROFILE="${GITHUB_REF#refs/heads/model/}"; PROFILE="${PROFILE%%-*}"; PROFILE="${PROFILE%%/*}" ;;
+              refs/tags/model-v*) PROFILE="ci" ;;
+              refs/tags/model-*) PROFILE="${GITHUB_REF#refs/tags/model-}"; PROFILE="${PROFILE%%-v*}" ;;
+            esac
+          fi
+          [ -f "Data/TrainProfiles/${PROFILE:-ci}.json" ] || { echo "no profile Data/TrainProfiles/${PROFILE}.json; using ci"; PROFILE=ci; }
+          P="Data/TrainProfiles/${PROFILE:-ci}.json"
+          pick() { jq -r ".$1" "$P"; }
+          {
+            echo "PROFILE=${PROFILE:-ci}"
+            echo "FOUNDRY_SPEC=$(pick Spec)"
+            echo "TOKENIZER_VERSION=$(pick Tokenizer)"
+            echo "HEADS=$(pick Heads)"
+            echo "BATCH=$(pick Batch)"
+            echo "PRETRAIN_MINUTES=$(pick PretrainMinutes)"
+            echo "EPOCHS=${IN_EPOCHS:-$(pick Epochs)}"
+            echo "EMBED=${IN_EMBED:-$(pick Embed)}"
+            echo "LAYERS=${IN_LAYERS:-$(pick Layers)}"
+            echo "SFT_STEPS=${IN_SFT:-$(pick SftSteps)}"
+            echo "MODEL_NAME=${IN_NAME:-$(pick Name)}"
+          } >> "$GITHUB_ENV"
+          echo "profile: $P"; cat "$P"
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
@@ -80,7 +120,7 @@ jobs:
       - name: Create the Foundry schema
         run: bun run foundry:migrate
 
-      - name: Collect the CI corpus from the spec (explicit permissive repos)
+      - name: Collect the corpus from the spec (explicit permissive repos)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -88,19 +128,24 @@ jobs:
           bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status
 
       - name: Train the tokenizer from the spec mix
-        run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=ci --Force
+        run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=$TOKENIZER_VERSION --Force
 
-      - name: Pretrain the base (epoch-capped)
+      - name: Pretrain the base (epoch-capped, stops gracefully at the time cap)
         run: |
-          bun run Scripts/TrainOnFoundry.ts --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.ci.json \
-            --Epochs=$EPOCHS --EmbedDim=$EMBED --Layers=$LAYERS --Heads=4 --Batch=16 \
-            --Workers=4 --Precision=F32 --Name=${MODEL_NAME}Base
+          mkdir -p Runs
+          STOP=Runs/stop-pretrain
+          rm -f "$STOP"
+          ( sleep $((PRETRAIN_MINUTES * 60)) && touch "$STOP" ) &
+          bun run Scripts/TrainOnFoundry.ts --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.$TOKENIZER_VERSION.json \
+            --Epochs=$EPOCHS --EmbedDim=$EMBED --Layers=$LAYERS --Heads=$HEADS --Batch=$BATCH \
+            --Workers=4 --Precision=F32 --Name=${MODEL_NAME}Base --StopFile=$STOP
+          if [ -f "$STOP" ]; then echo "::warning::pretrain hit the ${PRETRAIN_MINUTES}-minute cap and was stopped early (checkpoint saved at that step)"; fi
 
       - name: SFT the chat model from the base
         run: |
           bun run Scripts/TrainSftChat.ts --From=${MODEL_NAME}Base --Name=$MODEL_NAME \
-            --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.ci.json --Steps=$SFT_STEPS \
-            --EmbedDim=$EMBED --Layers=$LAYERS --Heads=4 --Batch=8 --Workers=4 --Precision=F32 \
+            --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.$TOKENIZER_VERSION.json --Steps=$SFT_STEPS \
+            --EmbedDim=$EMBED --Layers=$LAYERS --Heads=$HEADS --Batch=8 --Workers=4 --Precision=F32 \
             --CodeSamples=600 --Arithmetic=600 --Thinking=300 --CodeConvs=300 --MultiTurn=600
 
       - name: Evaluate (results stored in the checkpoint's Meta.Eval)
@@ -112,13 +157,13 @@ jobs:
       - name: Write the model card
         run: |
           mkdir -p Release
-          cp Checkpoints/${MODEL_NAME}.ckpt Checkpoints/${MODEL_NAME}Base.ckpt Data/Tokenizer.ci.json Release/
+          cp Checkpoints/${MODEL_NAME}.ckpt Checkpoints/${MODEL_NAME}Base.ckpt Data/Tokenizer.$TOKENIZER_VERSION.json Release/
           cp Runs/Eval/*.json Release/
           {
             echo "# $MODEL_NAME"
             echo
             echo "Trained by the train-model workflow (run ${{ github.run_id }}, commit ${{ github.sha }})."
-            echo "Spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · pretrain epochs $EPOCHS · SFT steps $SFT_STEPS."
+            echo "Profile: $PROFILE · spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · heads $HEADS · pretrain epochs $EPOCHS · SFT steps $SFT_STEPS."
             echo
             echo '```bash'
             echo "bun run serve --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # OpenAI-compatible on 127.0.0.1:8080"
@@ -135,8 +180,8 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Publish a GitHub Release (model-v* tags only)
-        if: startsWith(github.ref, 'refs/tags/model-v')
+      - name: Publish a GitHub Release (model tags only)
+        if: startsWith(github.ref, 'refs/tags/model-')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
