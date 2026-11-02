@@ -15,7 +15,8 @@ import { TrainBpe } from "../Brain/Tokenizer/BpeMergeTrainer.ts";
 import { BytePairEncoder } from "../Brain/Tokenizer/BytePairEncoder.ts";
 import { SpecialTokenizer } from "../Brain/Tokenizer/SpecialTokenizer.ts";
 import { Shahd } from "../Brain/Nn/Shahd.ts";
-import { CreateOptimizer, ClipGradGlobalNorm, ComputeLr } from "../Brain/Optim/OptimBarrel.ts";
+import { CreateOptimizer, ComputeLr } from "../Brain/Optim/OptimBarrel.ts";
+import { ClipGradsChecked } from "../Brain/Training/RunTrainingSteps.ts";
 import { SftForwardBackward } from "../Brain/Sft/SftStep.ts";
 import { RenderForTraining, ChatTokenList, RenderChat } from "../Brain/Sft/ChatTemplate.ts";
 import type { TrainingSequence } from "../Brain/Sft/ChatTemplate.ts";
@@ -263,7 +264,7 @@ for (let Step = StartStep; Step < Steps; Step++) {
     for (const P of Optimizer.Params) for (let I = 0; I < P.Size; I++) P.Grad[I] *= Inv;
     MeanLoss = Loss * Inv;
   }
-  ClipGradGlobalNorm(Optimizer.Params, Config.Optimizer.GradClipNorm);
+  ClipGradsChecked(Optimizer.Params, Config.Optimizer.GradClipNorm, Step);
   Optimizer.Step(CurrentLr);
   const ElapsedMs = Date.now() - GlobalStart;
   const StepMs = ElapsedMs - LastElapsedMs;

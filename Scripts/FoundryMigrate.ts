@@ -1,31 +1,21 @@
-// Create the documents table (M3b). Portable: JSONB embedding, no extension required, runs on any
-// Postgres. Run once against a live database:
+// Bring the Foundry database to its full schema in ONE idempotent step: the legacy `documents` table,
+// every per-kind `documents_<kind>` table, and all of their indexes (B-tree for the filters/orders the
+// stores use, plus pg_trgm GIN search indexes when the extension is available — skipped with a warning
+// otherwise). Portable: JSONB embedding, runs on any Postgres. Safe to re-run at any time and in any
+// order relative to MigrateKinds; it never copies or deletes rows.
 //   docker compose up -d   (or point DATABASE_URL at an existing Postgres)
-//   bun run Scripts/FoundryMigrate.ts
+//   bun run foundry:migrate
+// To move rows out of a pre-Phase-9 single `documents` table, follow up with
+//   bun run Scripts/MigrateKinds.ts --Apply
 
 import postgres from "postgres";
+import { EnsureFoundryDocumentSchema } from "../Foundry/FoundrySchema.ts";
+import { DatabaseUrl } from "./FoundryEnv.ts";
 
-const Url = process.env["DATABASE_URL"] ?? "postgres://shahd:shahd@localhost:5432/shahd";
-const Sql = postgres(Url);
-
-await Sql`
-  CREATE TABLE IF NOT EXISTS documents (
-    id            text PRIMARY KEY,
-    tier          text NOT NULL,
-    origin        text NOT NULL,
-    source        text NOT NULL,
-    license       text NOT NULL,
-    lang          text NOT NULL,
-    content       text NOT NULL,
-    bytes         integer NOT NULL,
-    quality_score real NOT NULL,
-    content_hash  text NOT NULL,
-    embedding     jsonb NOT NULL,
-    reject_reason text,
-    provenance    text NOT NULL,
-    ingested_at   text NOT NULL
-  )`;
-await Sql`CREATE INDEX IF NOT EXISTS documents_tier_idx ON documents (tier)`;
-
-await Sql.end();
-console.log("migrated: documents table ready (portable JSONB embedding)");
+const Sql = postgres(DatabaseUrl(), { onnotice: () => {} });
+try {
+  const { Tables, Trigram } = await EnsureFoundryDocumentSchema(Sql);
+  console.log(`migrated: ${Tables.length} document tables ready (${Tables.join(", ")}); trigram search indexes: ${Trigram ? "on" : "off (pg_trgm unavailable)"}`);
+} finally {
+  await Sql.end();
+}

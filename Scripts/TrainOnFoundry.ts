@@ -16,7 +16,6 @@ import { SpecialTokens } from "../Brain/Tokenizer/SpecialTokens.ts";
 import { FimTokens } from "../Brain/Data/FimReformat.ts";
 import { ChatTokenList } from "../Brain/Sft/ChatTemplate.ts";
 import { ToolTokenList } from "../Brain/Serving/ToolProtocol.ts";
-import { SplitAndEncodeDocuments } from "../Brain/Data/TrainValSplit.ts";
 import { DedupedIndices } from "../Brain/Data/NearDedup.ts";
 import { InMemoryDataLoader } from "../Brain/Data/DataLoader.ts";
 import { Shahd } from "../Brain/Nn/Shahd.ts";
@@ -31,9 +30,10 @@ import { ApplyCheckpoint } from "../Brain/Checkpoint/CheckpointReader.ts";
 import type { Checkpoint } from "../Brain/Checkpoint/CheckpointFormat.ts";
 import { PostgresCheckpointStore } from "../Foundry/PostgresCheckpointStore.ts";
 import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
-import { ResolveFoundryStores } from "./FoundryEnv.ts";
+import { CheckpointFile, ResolveFoundryStores } from "./FoundryEnv.ts";
 import { ReadArg, ReadFlag } from "./ScriptArgs.ts";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 // Specials reserved above the BPE vocab: EOS + the FIM sentinels + the chat/tool control tokens —
 // all reserved unconditionally so a later run (or resume of one) doesn't shift the vocab / token ids.
@@ -55,7 +55,7 @@ const BlockSize = Number(ReadArg("--Block=", "128"));
 const BatchSize = Number(ReadArg("--Batch=", "16"));
 const Workers = Number(ReadArg("--Workers=", "0")); // sequence-parallel worker threads; 0 = sequential
 const Steps = Number(ReadArg("--Steps=", "2000"));
-const SavePath = ReadArg("--Save=", "Checkpoints/Foundry.ckpt");
+const SavePath = ReadArg("--Save=", CheckpointFile());
 const Measure = ReadFlag("--Measure");
 // Storage precision: F32 halves tape/weight memory and feeds the 8-lane f32 kernels. Resumed runs
 // inherit the CHECKPOINT's precision below (changing width mid-run would reinterpret the weights).
@@ -66,8 +66,11 @@ const Precision = ReadArg("--Precision=", "F64") === "F32" ? "F32" as const : "F
 // is how a base model is composed as pure-code or code+language, with the mix controlled per kind.
 const CodeMb = Number(ReadArg("--CodeMb=", String(CorpusMb)));
 const KnowledgeMb = Number(ReadArg("--KnowledgeMb=", "0"));
+// ByTier reads in ascending id order, so the same budget always selects the same documents (a resumed
+// run sees the same corpus). PartIds stays index-aligned with Parts: the id drives the train/val split.
 const Stores = ResolveFoundryStores();
 const Parts: string[] = [];
+const PartIds: string[] = [];
 async function AddKind(Which: "code" | "knowledge", BudgetMb: number): Promise<void> {
   if (BudgetMb <= 0) return;
   const Budget = Math.round(BudgetMb * 1e6);
@@ -76,6 +79,7 @@ async function AddKind(Which: "code" | "knowledge", BudgetMb: number): Promise<v
   let Count = 0;
   for (const Doc of Docs) {
     Parts.push(Doc.Content);
+    PartIds.push(Doc.Id);
     Bytes += Doc.Bytes;
     Count++;
     if (Bytes >= Budget) break;
@@ -92,6 +96,7 @@ console.log(`corpus: ${Parts.length} docs total, ${(Parts.join("\n\n").length / 
 // an LSH-banded variant is the scale path.
 const KeepIdx = new Set(DedupedIndices(Parts, 0.8));
 const Docs = Parts.filter((_P, I) => KeepIdx.has(I));
+const DocIds = PartIds.filter((_P, I) => KeepIdx.has(I));
 console.log(`near-dedup: ${Parts.length} -> ${Docs.length} docs`);
 // Guard: an empty/misconfigured Filtered tier would otherwise train on nothing (a degenerate vocab
 // still passes Zod) and silently produce a meaningless model.
@@ -172,13 +177,46 @@ if (Inherited !== null) console.log(`resume: inheriting training semantics from 
 
 const ComputeChoice = ActivateFromConfig(Config);
 const Rng = CreateRngStreams(Config.Training.Seed);
-// Document-level split (shuffled) with EOS between docs — no positional train/val leak.
+// Document-level split with EOS between docs — no positional train/val leak. Membership is a property
+// of the DOCUMENT (its id hashes into a 0..99 bucket; buckets < ValPercent are validation), not of a
+// shuffle, so a resumed run — or a later run over a grown corpus — keeps every already-seen document
+// on the same side: nothing that was validation ever leaks into training.
 // EncodeBase (not Encode): pretraining docs are untrusted; EOS is added structurally below, so raw
 // text is never special-split for control tokens.
-const { Train, Val } = SplitAndEncodeDocuments(Docs, 0.1, Rng.DataRng, (Text) => Tokenizer.EncodeBase(Text), EosId);
-console.log(`split: ${Train.length} train + ${Val.length} val tokens (document-level, shuffled)`);
+const ValPercent = 10;
+const SplitBuckets = 100;
+function SplitBucket(Id: string): number {
+  return Number.parseInt(createHash("sha256").update(Id).digest("hex").slice(0, 8), 16) % SplitBuckets;
+}
+const Buckets = DocIds.map(SplitBucket);
+const IsVal = Buckets.map((B) => B < ValPercent);
+// Both sides must be non-empty (Docs.length >= 2 is guaranteed above). On a tiny corpus where the hash
+// put everything on one side, move the single most-borderline document across — chosen by (bucket, id),
+// so the fix-up is itself deterministic.
+const ByBucket = Docs.map((_D, I) => I).sort((A, B) => Buckets[A] - Buckets[B] || (DocIds[A] < DocIds[B] ? -1 : DocIds[A] > DocIds[B] ? 1 : 0));
+if (!IsVal.includes(true)) IsVal[ByBucket[0]] = true;
+if (!IsVal.includes(false)) IsVal[ByBucket[ByBucket.length - 1]] = false;
+function EncodeSide(WantVal: boolean): number[] {
+  const Out: number[] = [];
+  for (let I = 0; I < Docs.length; I++) {
+    if (IsVal[I] !== WantVal) continue;
+    for (const Id of Tokenizer.EncodeBase(Docs[I])) Out.push(Id);
+    Out.push(EosId);
+  }
+  return Out;
+}
+const Train = EncodeSide(false);
+const Val = EncodeSide(true);
+const ValDocs = IsVal.filter((V) => V).length;
+console.log(`split: ${Train.length} train + ${Val.length} val tokens (document-level by id hash: ${Docs.length - ValDocs} train / ${ValDocs} val docs)`);
+// Separate RNG streams: the train loader draws from DataRng (checkpointed, so resume continues the
+// exact batch sequence); validation draws from its own stream, so the NUMBER of eval draws can never
+// shift the training batch sequence. The val stream is derived from the run seed (reproducible) and
+// restarts on resume — eval batches are a measurement, not training state.
+const ValStreamSeedOffset = 0x5641; // "VA": any fixed offset; MixSeed decorrelates it from the train streams
+const ValRng = CreateRngStreams(Config.Training.Seed + ValStreamSeedOffset).DataRng;
 const TrainLoader = new InMemoryDataLoader(Train, Config.Model.BlockSize, Rng.DataRng);
-const ValLoader = new InMemoryDataLoader(Val, Config.Model.BlockSize, Rng.DataRng);
+const ValLoader = new InMemoryDataLoader(Val, Config.Model.BlockSize, ValRng);
 const Model = new Shahd(Config, Rng.InitRng);
 const Optimizer = CreateOptimizer(Model.Parameters(), Config);
 let StartStep = 0;
