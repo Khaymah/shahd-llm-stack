@@ -313,3 +313,12 @@ export function DecideResume(Opts: {
 export function StopFilePredicate(StopFile: string): (() => boolean) | undefined {
   return StopFile === "" ? undefined : (): boolean => existsSync(StopFile);
 }
+
+// ---- epochs -> steps ------------------------------------------------------------------------------
+
+/** The step count that shows every training token `Epochs` times: floor(Epochs x UniqueTokens / (Batch x Context)),
+ *  at least 1. The inverse of CheckEpochs: `--Epochs=2` on a 1.1M-token corpus at 16 x 256 gives 537 steps. */
+export function StepsForEpochs(Epochs: number, UniqueTokens: number, Batch: number, Context: number): number {
+  if (!(Epochs > 0) || !(UniqueTokens > 0) || !(Batch > 0) || !(Context > 0)) throw new Error(`StepsForEpochs: epochs, tokens, batch and context must be positive (got ${Epochs}, ${UniqueTokens}, ${Batch}, ${Context})`);
+  return Math.max(1, Math.floor((Epochs * UniqueTokens) / (Batch * Context)));
+}

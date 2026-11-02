@@ -23,6 +23,7 @@ import {
   ResolveSpec,
   SliceBudgets,
   SpecTotalMb,
+  StepsForEpochs,
 } from "../Scripts/TrainingCorpus.ts";
 import type { CorpusSource } from "../Scripts/TrainingCorpus.ts";
 
@@ -218,4 +219,12 @@ test("the special-token layouts: pretraining reserves EOS + FIM + every chat/too
   expect(PretrainSpecials[0]).toBe(SpecialTokens.Eos);
   expect(PretrainSpecials.slice(-ChatSpecials.length)).toEqual([...ChatSpecials]);
   expect(new Set(PretrainSpecials).size).toBe(PretrainSpecials.length);
+});
+
+test("StepsForEpochs is the inverse of the epoch guard", () => {
+  expect(StepsForEpochs(2, 1_100_805, 16, 256)).toBe(537);
+  expect(StepsForEpochs(4, 1_100_805, 16, 256)).toBe(1075); // the step count the guard suggested for 4 epochs
+  expect(CheckEpochs({ UniqueTokens: 1_100_805, Steps: StepsForEpochs(4, 1_100_805, 16, 256), Batch: 16, Context: 256, MaxEpochs: 4, AllowEpochs: null }).Ok).toBe(true);
+  expect(StepsForEpochs(0.001, 100, 16, 256)).toBe(1);
+  expect(() => StepsForEpochs(0, 100, 16, 256)).toThrow();
 });

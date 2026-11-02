@@ -38,7 +38,8 @@ import { PostgresCheckpointStore } from "../Foundry/PostgresCheckpointStore.ts";
 import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
 import { CheckpointFile, ResolveFoundryStores } from "./FoundryEnv.ts";
 import { ReadArg, ReadFlag, ReadFloatArg } from "./ScriptArgs.ts";
-import { AssembleSpecMix, CheckEpochs, ChooseTokenizerFile, DecideResume, DescribeMix, PickMerges, PretrainSources, PretrainSpecials, ResolveSpec, SpecTotalMb, StopFilePredicate } from "./TrainingCorpus.ts";
+import { AssembleSpecMix, CheckEpochs, ChooseTokenizerFile, DecideResume, DescribeMix, PickMerges, PretrainSources, PretrainSpecials, ResolveSpec, SpecTotalMb, StepsForEpochs, StopFilePredicate } from "./TrainingCorpus.ts";
+import { LoadBpeModel } from "../Brain/Tokenizer/Internal/BpeModelFile.ts";
 
 // Specials reserved above the BPE vocab: EOS + the FIM sentinels + the chat/tool control tokens —
 // all reserved unconditionally so a later run (or resume of one) doesn't shift the vocab / token ids.
@@ -65,7 +66,7 @@ const NumHeads = Number(ReadArg("--Heads=", "4"));
 const BlockSize = Number(ReadArg("--Block=", Spec !== null ? String(Spec.Training.ContextTokens) : "128"));
 const BatchSize = Number(ReadArg("--Batch=", "16"));
 const Workers = Number(ReadArg("--Workers=", "0")); // sequence-parallel worker threads; 0 = sequential
-const Steps = Number(ReadArg("--Steps=", "2000"));
+let Steps = Number(ReadArg("--Steps=", "2000")); // replaced by --Epochs below when given
 const SavePath = ReadArg("--Save=", CheckpointFile());
 const Measure = ReadFlag("--Measure");
 // Storage precision: F32 halves tape/weight memory and feeds the 8-lane f32 kernels. Resumed runs
@@ -146,6 +147,22 @@ if (Docs.length < 2) {
 }
 const CorpusText = Docs.join("\n\n");
 
+// --Epochs=<n>: derive Steps from the data instead of guessing it (the inverse of the epoch guard,
+// and what the train-model workflow passes). It needs the training-side token count, so the merges
+// are resolved early - the tokenizer file, else fresh merges that the real tokenizer below reuses.
+const EpochsArg = ReadArg("--Epochs=", "");
+let EarlyMerges: [number, number][] | null = null;
+if (EpochsArg !== "" && !Measure) {
+  const Epochs = ReadFloatArg("--Epochs", 0, { Min: Number.MIN_VALUE });
+  EarlyMerges = TokenizerFile !== null ? LoadBpeModel(TokenizerFile.Path).Merges : TrainBpe(CorpusText, NumMerges).Merges;
+  const EarlyTok = new SpecialTokenizer(new BytePairEncoder({ Merges: EarlyMerges }), BaseSpecials);
+  const EarlyVal = AssignValidationSides(DocIds);
+  let TrainingTokens = 0;
+  for (let I = 0; I < Docs.length; I++) if (!EarlyVal[I]) TrainingTokens += EarlyTok.EncodeBase(Docs[I]).length + 1; // + EOS
+  Steps = StepsForEpochs(Epochs, TrainingTokens, BatchSize, BlockSize);
+  console.log(`--Epochs=${Epochs}: ${TrainingTokens.toLocaleString("en-US")} training tokens at batch ${BatchSize} x context ${BlockSize} -> --Steps=${Steps}`);
+}
+
 const EffectiveSteps = Measure ? 8 : Steps;
 const CkptName = ReadArg("--Name=", "foundry");
 const DbUrl = process.env["DATABASE_URL"];
@@ -189,7 +206,7 @@ if (CkptStore !== null && !Measure && !Fresh) {
 const T0 = Date.now();
 let Choice: ReturnType<typeof PickMerges>;
 try {
-  Choice = PickMerges(Resume !== null ? { Merges: Resume.Merges, From: "checkpoint", Name: CkptName } : null, TokenizerFile, () => TrainBpe(CorpusText, NumMerges).Merges);
+  Choice = PickMerges(Resume !== null ? { Merges: Resume.Merges, From: "checkpoint", Name: CkptName } : null, TokenizerFile, () => EarlyMerges ?? TrainBpe(CorpusText, NumMerges).Merges);
 } catch (Refused) {
   console.error((Refused as Error).message);
   if (CkptStore !== null) await CkptStore.Close();

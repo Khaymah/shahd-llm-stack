@@ -1,0 +1,138 @@
+# Train a small Shahd model end-to-end on a GitHub runner and publish it as a downloadable artifact
+# (and as a GitHub Release when run on a `model-v*` tag). Same pipeline a developer runs locally:
+#   ingest-spec (Data/Spec.ci.json, GITHUB_TOKEN) -> train:bpe -> pretrain (epoch-capped) -> SFT
+#   -> eval (Meta.Eval written into the checkpoint) -> artifact.
+# The runner has 4 vCPUs and a 6 h job limit; the CI spec is sized so a run finishes in ~1 h.
+name: Train model
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Pretraining epochs over the unique tokens (<= Spec MaxEpochs; 2 = the memorisation-safe default)"
+        default: "2"
+      embed:
+        description: "Embedding width (128 = CI tier; 192/256 need the 6 h budget)"
+        default: "128"
+      layers:
+        description: "Transformer layers"
+        default: "4"
+      sft_steps:
+        description: "SFT steps from the pretrained base"
+        default: "400"
+      name:
+        description: "Model name (checkpoint + artifact)"
+        default: "CiChat"
+  push:
+    tags: ["model-v*"]
+
+concurrency:
+  group: train-model-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: postgres://shahd:shahd@localhost:5432/shahd
+  FOUNDRY_SPEC: Data/Spec.ci.json
+  MODEL_NAME: ${{ github.event.inputs.name || 'CiChat' }}
+  EPOCHS: ${{ github.event.inputs.epochs || '2' }}
+  EMBED: ${{ github.event.inputs.embed || '128' }}
+  LAYERS: ${{ github.event.inputs.layers || '4' }}
+  SFT_STEPS: ${{ github.event.inputs.sft_steps || '400' }}
+
+jobs:
+  train:
+    name: ingest → tokenizer → pretrain → SFT → eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: write # release upload on model-v* tags
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shahd
+          POSTGRES_PASSWORD: shahd
+          POSTGRES_DB: shahd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shahd"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: GoKernels/go.mod
+      - run: bun install --frozen-lockfile
+
+      - name: Build the Go/C FFI kernel (AVX2 with scalar fallback)
+        working-directory: GoKernels/ffi
+        run: go build -buildmode=c-shared -o ../matmul.dll ./
+
+      - name: Create the Foundry schema
+        run: bun run foundry:migrate
+
+      - name: Collect the CI corpus from the spec (explicit permissive repos)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status
+
+      - name: Train the tokenizer from the spec mix
+        run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=ci --Force
+
+      - name: Pretrain the base (epoch-capped)
+        run: |
+          bun run Scripts/TrainOnFoundry.ts --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.ci.json \
+            --Epochs=$EPOCHS --EmbedDim=$EMBED --Layers=$LAYERS --Heads=4 --Batch=16 \
+            --Workers=4 --Precision=F32 --Name=${MODEL_NAME}Base
+
+      - name: SFT the chat model from the base
+        run: |
+          bun run Scripts/TrainSftChat.ts --From=${MODEL_NAME}Base --Name=$MODEL_NAME \
+            --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.ci.json --Steps=$SFT_STEPS \
+            --EmbedDim=$EMBED --Layers=$LAYERS --Heads=4 --Batch=8 --Workers=4 --Precision=F32 \
+            --CodeSamples=600 --Arithmetic=600 --Thinking=300 --CodeConvs=300 --MultiTurn=600
+
+      - name: Evaluate (results stored in the checkpoint's Meta.Eval)
+        run: |
+          bun run eval --Checkpoint=${MODEL_NAME}Base --MaxCases=8 --HeldOutDocs=40 --WriteMeta
+          bun run eval --Checkpoint=$MODEL_NAME --MaxCases=8 --HeldOutDocs=40 \
+            --Baseline=Checkpoints/${MODEL_NAME}Base.ckpt --WriteMeta
+
+      - name: Write the model card
+        run: |
+          mkdir -p Release
+          cp Checkpoints/${MODEL_NAME}.ckpt Checkpoints/${MODEL_NAME}Base.ckpt Data/Tokenizer.ci.json Release/
+          cp Runs/Eval/*.json Release/
+          {
+            echo "# $MODEL_NAME"
+            echo
+            echo "Trained by the train-model workflow (run ${{ github.run_id }}, commit ${{ github.sha }})."
+            echo "Spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · pretrain epochs $EPOCHS · SFT steps $SFT_STEPS."
+            echo
+            echo '```bash'
+            echo "bun run serve --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # OpenAI-compatible on 127.0.0.1:8080"
+            echo "bun run eval  --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # the frozen suite"
+            echo "FOUNDRY_CHECKPOINT=Checkpoints/${MODEL_NAME}.ckpt bun run foundry:dashboard   # chat with it"
+            echo '```'
+          } > Release/README.md
+          ls -la Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MODEL_NAME }}
+          path: Release/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish a GitHub Release (model-v* tags only)
+        if: startsWith(github.ref, 'refs/tags/model-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" Release/* --title "${MODEL_NAME} ${GITHUB_REF_NAME}" --notes-file Release/README.md
