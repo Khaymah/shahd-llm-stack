@@ -43,7 +43,7 @@ Layered low → high; imports only ever point downward.
 | `Checkpoint/` | Self-describing checkpoint format, writer, reader. |
 | `Safety/` | `HarmfulPatterns.ts`, `ContentFilter.ts`, `SafetyPolicy.ts`, `GuardedGenerate.ts` — the controllable safety gate. |
 | `Sft/` | `ChatTemplate.ts` (loss masking), `TaskTaxonomy.ts`, `ToolUseExamples.ts`, `SftStep.ts`. |
-| `Eval/` `Rl/` | `PassAtK`, sandboxed `CodeExecutor`, `EvalHarness`; `RejectionSampling` (RLVR). |
+| `Eval/` `Rl/` | `PassAtK`, resource-capped `CodeExecutor` (not a sandbox), `EvalHarness`; `RejectionSampling` (RLVR). |
 | `Serving/` | `ToolProtocol`, `Tools/` (the rich tool system + central capability gate), `AgentLoop`, `ChatSession`, `Compaction`, `InferenceServer`. |
 | `Reasoning/` | `SpeculativeDecode`, `SelfConsistency`, `TreeOfThoughts`, `ThinkingMode`. |
 | `ComputeBackend/` | The numeric backend seam: `ComputeBackend` (interface), `TsBackend`/`TsBackendF32`, `GoBackend`/`GoFfiBackend`, `BackendSelector` (runtime toggle), `WebGpuMatMul`/`AsyncCompute`. |

@@ -27,13 +27,15 @@ exactly one kind table.
 ```bash
 docker compose up -d              # start Postgres (see docker-compose.yml)
 cp .env.example .env              # DATABASE_URL=postgres://shahd:shahd@localhost:5432/shahd
-bun run foundry:migrate           # create the base documents table (portable JSONB embedding)
-bun run Scripts/MigrateKinds.ts --Apply   # split into per-kind documents_<kind> tables
+bun run foundry:migrate           # idempotent: every documents_<kind> table + indexes (+ pg_trgm when available)
+bun run Scripts/MigrateKinds.ts --Apply   # only for a DB created before per-kind tables: copies legacy rows over
 ```
 
 Schema (`Foundry/FoundrySchema.ts`): id (content hash), tier, origin, source, license, lang, content,
 bytes, quality_score, content_hash, `embedding jsonb`, reject_reason, provenance, ingested_at. The
-collection ledger lives in a small `collection_state` table (self-created on first use).
+collection ledger lives in a small `collection_state` table (self-created on first use). Trained
+checkpoints keep only metadata + sha256 in the `checkpoints` table; the payload is a `.ckpt` file under
+`FOUNDRY_CHECKPOINT_DIR` (default `Checkpoints/`).
 
 ## The collection engine
 

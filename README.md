@@ -73,7 +73,7 @@ per-reply persisted reasoning): [Docs/screenshots/shahd-chat-full-conversation.p
 | `Checkpoint/`           | Self-describing checkpoints (weights + optimizer + RNG + config + hash)                                   |
 | `Safety/`               | Controllable content-safety filter + resource limits +`GuardedGenerate` (absolute priority)             |
 | `Sft/`                  | Chat template + loss masking, task taxonomy, tool-use exemplars                                           |
-| `Eval/` `Rl/`         | pass@k, sandboxed code executor, RLVR rejection sampling                                                  |
+| `Eval/` `Rl/`         | pass@k, resource-capped code runner (not a sandbox), RLVR rejection sampling                                                  |
 | `Serving/`              | Tool protocol,**rich tool system** (`Tools/`), agent loop, OpenAI-compatible server               |
 | `Reasoning/`            | Speculative decoding, self-consistency, tree-of-thoughts, thinking-mode                                   |
 | `ComputeBackend/`       | Pluggable numeric backend seam: TS, Go subprocess, Go FFI (in-process, 2–8× on CPU)                     |
