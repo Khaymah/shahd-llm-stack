@@ -14,6 +14,7 @@
     "sample": "bun run Scripts/Sample.ts",
     "serve": "bun run Scripts/Serve.ts",
     "bench": "bun run Scripts/Bench.ts",
+    "eval": "bun run Scripts/Eval.ts",
     "train:bpe": "bun run Scripts/TrainBpeMerges.ts",
     "star": "bun run Scripts/StarRound.ts",
     "foundry": "bun run Scripts/RunFoundry.ts",

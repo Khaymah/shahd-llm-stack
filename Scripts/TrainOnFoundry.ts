@@ -17,6 +17,9 @@ import { FimTokens } from "../Brain/Data/FimReformat.ts";
 import { ChatTokenList } from "../Brain/Sft/ChatTemplate.ts";
 import { ToolTokenList } from "../Brain/Serving/ToolProtocol.ts";
 import { DedupedIndices } from "../Brain/Data/NearDedup.ts";
+import { DocumentSplitBucket, ValidationPercent } from "../Brain/Data/DocumentSplit.ts";
+import { Decontaminate } from "../Brain/Data/Decontamination.ts";
+import { TrainingDecontaminationDocs } from "../Brain/Eval/Suite/SuiteEvalDocs.ts";
 import { InMemoryDataLoader } from "../Brain/Data/DataLoader.ts";
 import { Shahd } from "../Brain/Nn/Shahd.ts";
 import { CreateOptimizer } from "../Brain/Optim/OptimBarrel.ts";
@@ -33,7 +36,6 @@ import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
 import { CheckpointFile, ResolveFoundryStores } from "./FoundryEnv.ts";
 import { ReadArg, ReadFlag } from "./ScriptArgs.ts";
 import { existsSync } from "node:fs";
-import { createHash } from "node:crypto";
 
 // Specials reserved above the BPE vocab: EOS + the FIM sentinels + the chat/tool control tokens —
 // all reserved unconditionally so a later run (or resume of one) doesn't shift the vocab / token ids.
@@ -95,13 +97,19 @@ console.log(`corpus: ${Parts.length} docs total, ${(Parts.join("\n\n").length / 
 // (b) over-weight repeated code. Apply it here, right before training. O(n^2) — fine at current scale;
 // an LSH-banded variant is the scale path.
 const KeepIdx = new Set(DedupedIndices(Parts, 0.8));
-const Docs = Parts.filter((_P, I) => KeepIdx.has(I));
-const DocIds = PartIds.filter((_P, I) => KeepIdx.has(I));
-console.log(`near-dedup: ${Parts.length} -> ${Docs.length} docs`);
+const DedupedDocs = Parts.filter((_P, I) => KeepIdx.has(I));
+const DedupedIds = PartIds.filter((_P, I) => KeepIdx.has(I));
+console.log(`near-dedup: ${Parts.length} -> ${DedupedDocs.length} docs`);
+// Eval decontamination: drop every document sharing a 13-gram with the fixed eval suite or the coding
+// problem set, so the suite stays an honest held-out measurement (same rule as TrainOnCorpus/BuildCorpus).
+const Decon = Decontaminate(DedupedDocs, TrainingDecontaminationDocs());
+const Docs = Decon.Kept.map((I) => DedupedDocs[I]);
+const DocIds = Decon.Kept.map((I) => DedupedIds[I]);
+console.log(`decontamination: removed ${Decon.Removed.length} docs overlapping the eval suite -> ${Docs.length} docs`);
 // Guard: an empty/misconfigured Filtered tier would otherwise train on nothing (a degenerate vocab
 // still passes Zod) and silently produce a meaningless model.
 if (Docs.length < 2) {
-  throw new Error(`TrainOnFoundry: need >= 2 Filtered documents after near-dedup (got ${Docs.length}) — collect/curate more data first`);
+  throw new Error(`TrainOnFoundry: need >= 2 Filtered documents after near-dedup + decontamination (got ${Docs.length}) — collect/curate more data first`);
 }
 const CorpusText = Docs.join("\n\n");
 
@@ -183,13 +191,10 @@ const Rng = CreateRngStreams(Config.Training.Seed);
 // on the same side: nothing that was validation ever leaks into training.
 // EncodeBase (not Encode): pretraining docs are untrusted; EOS is added structurally below, so raw
 // text is never special-split for control tokens.
-const ValPercent = 10;
-const SplitBuckets = 100;
-function SplitBucket(Id: string): number {
-  return Number.parseInt(createHash("sha256").update(Id).digest("hex").slice(0, 8), 16) % SplitBuckets;
-}
-const Buckets = DocIds.map(SplitBucket);
-const IsVal = Buckets.map((B) => B < ValPercent);
+// The bucket rule itself lives in Brain/Data/DocumentSplit.ts — shared with the eval suite's frozen
+// held-out set, so "validation" is the same documents in both places.
+const Buckets = DocIds.map(DocumentSplitBucket);
+const IsVal = Buckets.map((B) => B < ValidationPercent);
 // Both sides must be non-empty (Docs.length >= 2 is guaranteed above). On a tiny corpus where the hash
 // put everything on one side, move the single most-borderline document across — chosen by (bucket, id),
 // so the fix-up is itself deterministic.

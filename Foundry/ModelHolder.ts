@@ -13,17 +13,18 @@ import type { Shahd } from "../Brain/Nn/Shahd.ts";
 import type { Checkpoint } from "../Brain/Checkpoint/CheckpointFormat.ts";
 import { LoadRunnableModel, LoadRunnableModelFrom } from "../Brain/Checkpoint/LoadRunnableModel.ts";
 import type { RunnableModel } from "../Brain/Checkpoint/LoadRunnableModel.ts";
-import { GuardedGenerateStream, GuardedGenerateIdsStream, IncrementalDecoder } from "../Brain/Safety/GuardedGenerate.ts";
+import { GuardedGenerateStream, IncrementalDecoder } from "../Brain/Safety/GuardedGenerate.ts";
 import { SafetyPolicy } from "../Brain/Safety/SafetyPolicy.ts";
 import { RenderMessages } from "../Brain/Serving/RenderChat.ts";
 import { ChatSession } from "../Brain/Serving/ChatSession.ts";
 import { SpecialTokenizer } from "../Brain/Tokenizer/SpecialTokenizer.ts";
 import { RunAgent } from "../Brain/Serving/AgentLoop.ts";
-import type { AgentStep, GeneratedTurn } from "../Brain/Serving/AgentLoop.ts";
+import type { AgentStep } from "../Brain/Serving/AgentLoop.ts";
+import { CreateModelGenerator } from "../Brain/Serving/ModelGenerator.ts";
 import { FormatTrace, BuildTrace } from "../Brain/Serving/ReasoningTrace.ts";
 import { BuildAgentTooling } from "../Brain/Serving/Tools/ToolsBarrel.ts";
 import { OwnedSystemPrompt } from "../Brain/Sft/OwnedSftData.ts";
-import { ChatTokens, SplitThinkingIds, TruncateAtTurnEnd } from "../Brain/Sft/ChatTemplate.ts";
+import { SplitThinkingIds, TruncateAtTurnEnd } from "../Brain/Sft/ChatTemplate.ts";
 import { ToolTokens } from "../Brain/Serving/ToolProtocol.ts";
 import { ExtractAnswer, NormalizeAnswer, MajorityVote } from "../Brain/Reasoning/ReasoningBarrel.ts";
 import { DefaultSampling } from "../Brain/Sampling/Sampler.ts";
@@ -233,7 +234,7 @@ async function ServeChatAgent(
   Counter: { Value: number },
   Log: (Message: string) => void,
 ): Promise<string> {
-  const { Model, Tokenizer, Config } = Loaded;
+  const { Tokenizer, Config } = Loaded;
   const Policy = new SafetyPolicy(Config);
   const Tooling = BuildAgentTooling(Config);
   // TRAIN/SERVE PROMPT PARITY: the SFT conversations were trained with the short OwnedSystemPrompt and
@@ -250,10 +251,9 @@ async function ServeChatAgent(
   // N>1 the runs are candidates (losers are discarded), so nothing can stream.
   const SingleRun = SelfConsistencySamples <= 1;
   const StreamTokens = SingleRun && Special !== null;
-  // ASYNC + EARLY-STOP: the guarded generator yields per token (the dashboard never freezes), honors
-  // ShouldStop, and the <|endofturn|> id ends the pass the moment the model closes its turn.
-  const EndOfTurnId = Special === null ? null : Special.Id(ChatTokens.EndOfTurn);
-  const StopIds = EndOfTurnId === null ? undefined : new Set([EndOfTurnId]);
+  // ASYNC + EARLY-STOP: the guarded generator (Brain/Serving/ModelGenerator.ts — the same factory the
+  // eval suite drives) yields per token (the dashboard never freezes), honors ShouldStop, and the
+  // <|endofturn|> id ends the pass the moment the model closes its turn.
   const Sampling = { ...DefaultSampling, Temperature: Opts.Temperature };
   let ThinkSeg = 0; // one segment per generation pass => the UI groups think spans per agent step
 
@@ -266,25 +266,18 @@ async function ServeChatAgent(
     }
     Tooling.Context.Session = Session;
     const Rng = new SeededRng(Config.Training.Seed + Counter.Value++);
-    const Gen = async (Turn: ChatSession): Promise<string | GeneratedTurn> => {
-      const PromptIds = Special !== null ? Turn.RenderPromptIds(Special) : Tokenizer.Encode(Turn.RenderPrompt());
-      const Seg = ThinkSeg++;
-      const Live = StreamTokens && Special !== null
-        ? new LiveTurnSplit(Special, (Delta) => Opts.OnThink?.(Delta, Seg), OnDelta)
-        : null;
-      const Ids = await GuardedGenerateIdsStream(
-        Model, Tokenizer, PromptIds, Opts.MaxTokens, Sampling, Rng, Config,
-        (Id) => Live?.Push(Id),
-        Opts.ShouldStop,
-        { StopIds },
-      );
-      // A special-token model hands the loop its ids (the completion only): end of turn, thinking and
-      // tool calls are then decided on special ids. A plain tokenizer has none: return the text.
-      if (Special !== null) return { Ids, Tok: Special };
-      const Text = Tokenizer.Decode(Ids);
-      const End = Text.indexOf(ChatTokens.EndOfTurn);
-      return End >= 0 ? Text.slice(0, End) : Text;
-    };
+    const Gen = CreateModelGenerator(Loaded, {
+      MaxTokens: Opts.MaxTokens,
+      Sampling,
+      Rng,
+      ShouldStop: Opts.ShouldStop,
+      OnPassStart: () => {
+        const Seg = ThinkSeg++;
+        if (!StreamTokens || Special === null) return null;
+        const Live = new LiveTurnSplit(Special, (Delta) => Opts.OnThink?.(Delta, Seg), OnDelta);
+        return (Id) => Live.Push(Id);
+      },
+    });
     const Steps: AgentStep[] = [];
     const Result = await RunAgent(Session, Gen, Tooling.Registry, Tooling.MaxSteps, Tooling.Context, (Step) => {
       Steps.push(Step);

@@ -32,6 +32,8 @@ import { PostgresCheckpointStore } from "../Foundry/PostgresCheckpointStore.ts";
 import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
 import { CreateTrainWorkerPool } from "../Brain/Training/WorkerPool.ts";
 import { StripThinking } from "../Brain/Reasoning/ThinkingMode.ts";
+import { Decontaminate } from "../Brain/Data/Decontamination.ts";
+import { TrainingDecontaminationDocs } from "../Brain/Eval/Suite/SuiteEvalDocs.ts";
 import { ResolveFoundryStores } from "./FoundryEnv.ts";
 import { ReadArg, ReadFlag } from "./ScriptArgs.ts";
 import { existsSync } from "node:fs";
@@ -91,6 +93,11 @@ for (const Doc of ConvDocs) {
   AddedGeneral++;
 }
 await Stores.Close();
+// Eval decontamination: drop every conversation (owned or collected) sharing a 13-gram with the fixed
+// eval suite or the coding problem set, BEFORE the tokenizer is trained or anything is rendered.
+const Decon = Decontaminate(Conversations.map((C) => C.map((M) => M.Content).join("\n")), TrainingDecontaminationDocs());
+for (const Index of [...Decon.Removed].reverse()) Conversations.splice(Index, 1);
+console.log(`decontamination: removed ${Decon.Removed.length} conversations overlapping the eval suite`);
 console.log(`sft: ${Conversations.length} conversations (${CodeDocs.length} code samples + ${AddedGeneral} real dialogues from documents_conversation)`);
 
 // RESUME/EXTEND: continue an existing chat checkpoint of this name — reuse its EXACT tokenizer (merges
