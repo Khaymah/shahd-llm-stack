@@ -27,6 +27,13 @@ export class SpecialTokenizer implements Tokenizer {
     return Found;
   }
 
+  /** The id of a special token, or null when this tokenizer was built without it. Lets ids-level
+   *  parsers (tool calls, end-of-turn) degrade to "not present" instead of throwing on a tokenizer
+   *  that never reserved that sentinel. */
+  TryId(Special: string): number | null {
+    return this.SpecialToId.get(Special) ?? null;
+  }
+
   // Encode through the BASE tokenizer ONLY — never emits a special-token id, even if the text
   // literally contains a reserved string like "<|assistant|>". This is the control/data channel
   // separation: UNTRUSTED text (user messages, tool/MCP results, file contents) MUST be encoded with

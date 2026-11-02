@@ -15,7 +15,9 @@ export type TraceLine = { Step: number; Kind: TraceKind; Text: string; Detail?: 
 export function BuildTrace(Steps: AgentStep[]): TraceLine[] {
   const Lines: TraceLine[] = [];
   for (const Step of Steps) {
-    const Split = SplitThinking(Step.Generated);
+    // Prefer the loop's own split (made on special ids for a real model turn, so echoed "<|think|>" text
+    // is not mistaken for reasoning); hand-built steps fall back to the string split.
+    const Split = Step.Split ?? SplitThinking(Step.Generated);
     if (Split.HadThinking && Split.Thinking.length > 0) {
       Lines.push({ Step: Step.Index, Kind: "think", Text: Split.Thinking });
     }

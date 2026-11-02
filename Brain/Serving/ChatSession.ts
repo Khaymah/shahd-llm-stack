@@ -18,8 +18,12 @@ export class ChatSession {
     this.Messages.push({ Role: "User", Content });
   }
 
-  AddAssistant(Content: string): void {
-    this.Messages.push({ Role: "Assistant", Content });
+  /** Record an assistant turn. Pass Ids (the model's generated content ids) whenever the turn came from
+   *  the model: RenderPromptIds then splices them verbatim, so its control tokens stay exactly the ones
+   *  it emitted. Without Ids (a client-replayed history, a scripted string) the text is base-encoded at
+   *  render time and can never be promoted into control tokens. */
+  AddAssistant(Content: string, Ids?: readonly number[]): void {
+    this.Messages.push(Ids === undefined ? { Role: "Assistant", Content } : { Role: "Assistant", Content, Ids: [...Ids] });
   }
 
   /** Feed a tool result back into the conversation (as a user turn the model reads next). */
@@ -37,7 +41,8 @@ export class ChatSession {
 
   /** Render the prompt directly to token ids — the SAFE serving path for special-token (chat) models.
    *  Content is base-encoded (never re-scanned for specials), so untrusted user/tool text can't forge
-   *  role/turn boundaries. Uses the same per-message core as training, so no train/serve skew. */
+   *  role/turn boundaries; assistant turns recorded with Ids are spliced verbatim. Uses the same
+   *  per-message core as training, so no train/serve skew. */
   RenderPromptIds(Tok: SpecialTokenizer): number[] {
     return RenderChatToIds(this.Messages, Tok, true);
   }
