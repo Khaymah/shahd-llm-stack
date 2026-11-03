@@ -13,6 +13,7 @@
 // Foundry DocumentStore satisfies as-is (the script passes one per data kind).
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { z } from "zod";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IsValidationDocument } from "../../Data/DocumentSplit.ts";
@@ -80,10 +81,30 @@ export async function LoadHeldOutFromStore(
   return { Origin: "store", Note: `store Filtered tier, validation side of the document split (sha256(id) mod 100 < 10), ascending id: ${Counts.join(", ")}`, Docs };
 }
 
-/** (b) Held-out text from a file, one kind ("file"), split into documents at blank lines. */
+/** (b) Held-out text from a file. A `.jsonl` file holds one whole document per line
+ *  (`{"Kind": "...", "Id": "...", "Content": "..."}`) and keeps its kinds, so a frozen, committed set
+ *  reports BPB per language; any other file is one kind ("file") split into documents at blank lines
+ *  (fine for prose, but it would cut source files into fragments). */
 export function LoadHeldOutFromFile(Path: string): HeldOutSet {
+  if (Path.endsWith(".jsonl")) return LoadHeldOutFromJsonl(Path);
   const Parts = readFileSync(Path, "utf8").split(ParagraphBreak).filter((P) => P.trim().length > 0);
   return { Origin: "file", Note: `file ${Path} (${Parts.length} blocks)`, Docs: Parts.map((Content, I) => ({ Kind: "file", Id: `${Path}#${I}`, Content })) };
+}
+
+const HeldOutJsonlLine = z.object({ Kind: z.string().min(1), Id: z.string().min(1), Content: z.string().min(1) });
+
+function LoadHeldOutFromJsonl(Path: string): HeldOutSet {
+  const Docs: HeldOutDoc[] = [];
+  const Lines = readFileSync(Path, "utf8").split("\n");
+  for (let I = 0; I < Lines.length; I++) {
+    const Line = Lines[I]!.trim();
+    if (Line === "") continue;
+    const Parsed = HeldOutJsonlLine.safeParse(JSON.parse(Line));
+    if (!Parsed.success) throw new Error(`${Path}:${I + 1}: expected {Kind, Id, Content} (${Parsed.error.issues[0]?.message ?? "invalid"})`);
+    Docs.push(Parsed.data);
+  }
+  const Kinds = [...new Set(Docs.map((D) => D.Kind))].map((Kind) => `${Kind}=${Docs.filter((D) => D.Kind === Kind).length}`);
+  return { Origin: "file", Note: `file ${Path} (${Docs.length} documents: ${Kinds.join(", ")})`, Docs };
 }
 
 /** (c) The built-in seed corpus (every file under Corpus/Seed/, sorted by name), kind "seed". */

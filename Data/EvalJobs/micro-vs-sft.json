@@ -1,0 +1,25 @@
+{
+  "Note": "Full frozen suite + HeldOutV1 on the three models trained so far. MicroChat2 is the baseline; MicroChat2Sft is the same base with the synthetic tools/multi-turn data added to SFT (the clean A/B); CiChat is the smaller first model.",
+  "HeldOut": "Data/Eval/HeldOutV1.jsonl",
+  "MaxCases": 0,
+  "Models": [
+    {
+      "Label": "MicroChat2",
+      "RunId": "41522300940",
+      "Artifact": "MicroChat2",
+      "Checkpoint": "MicroChat2.ckpt"
+    },
+    {
+      "Label": "MicroChat2Sft",
+      "RunId": "41563100189",
+      "Artifact": "MicroChat2Sft",
+      "Checkpoint": "MicroChat2Sft.ckpt"
+    },
+    {
+      "Label": "CiChat",
+      "RunId": "41514914047",
+      "Artifact": "CiChat",
+      "Checkpoint": "CiChat.ckpt"
+    }
+  ]
+}
