@@ -1,0 +1,114 @@
+# Evaluate already-trained models on the FULL frozen suite (every case of Brain/Eval/Suite/Data/CaseSetV1)
+# and the frozen held-out code (Data/Eval/HeldOutV1.jsonl), then compare each model with the first one.
+# Training runs evaluate only a few cases per category (fast, noisy); this is the apples-to-apples number.
+#
+# Which models: Data/EvalJobs/<job>.json, picked from the `job` input of a manual run, or from the branch
+# name `eval/<job>-<anything>` (e.g. eval/micro-vs-sft-1). Each model is a checkpoint inside a train-model
+# run's artifact: {Label, RunId, Artifact, Checkpoint}. The first model is the baseline.
+name: Evaluate models
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Evaluation job from Data/EvalJobs (e.g. micro-vs-sft)"
+        default: "micro-vs-sft"
+  push:
+    branches: ["eval/**"]
+
+concurrency:
+  group: eval-models-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read # download artifacts from other runs
+
+jobs:
+  evaluate:
+    name: full frozen suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the evaluation job
+        env:
+          IN_JOB: ${{ github.event.inputs.job }}
+        run: |
+          JOB="$IN_JOB"
+          if [ -z "$JOB" ]; then
+            case "$GITHUB_REF" in
+              refs/heads/eval/*) JOB="${GITHUB_REF#refs/heads/eval/}"; JOB="${JOB%-[0-9]*}" ;;
+            esac
+          fi
+          F="Data/EvalJobs/${JOB}.json"
+          [ -f "$F" ] || { echo "::error::no evaluation job $F"; exit 1; }
+          echo "EVAL_JOB_FILE=$F" >> "$GITHUB_ENV"
+          echo "job: $F"; cat "$F"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: GoKernels/go.mod
+      - run: bun install --frozen-lockfile
+
+      - name: Build the Go/C FFI kernel (AVX2 with scalar fallback)
+        working-directory: GoKernels/ffi
+        run: go build -buildmode=c-shared -o ../matmul.dll ./
+
+      - name: Download the models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p Runs/Models
+          jq -c '.Models[]' "$EVAL_JOB_FILE" | while read -r M; do
+            LABEL=$(echo "$M" | jq -r .Label); RUN=$(echo "$M" | jq -r .RunId); ART=$(echo "$M" | jq -r .Artifact)
+            echo "::group::$LABEL <- run $RUN artifact $ART"
+            gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n "$ART" -D "Runs/Models/$LABEL"
+            ls -la "Runs/Models/$LABEL"
+            echo "::endgroup::"
+          done
+
+      - name: Evaluate every model on the full suite
+        run: |
+          HELD=$(jq -r '.HeldOut // "Data/Eval/HeldOutV1.jsonl"' "$EVAL_JOB_FILE")
+          CASES=$(jq -r '.MaxCases // 0' "$EVAL_JOB_FILE")
+          BASELINE=""
+          mkdir -p Runs/EvalJob
+          jq -c '.Models[]' "$EVAL_JOB_FILE" | while read -r M; do
+            LABEL=$(echo "$M" | jq -r .Label); CKPT=$(echo "$M" | jq -r .Checkpoint)
+            echo "::group::eval $LABEL"
+            if [ -z "$BASELINE" ]; then
+              bun run eval --Checkpoint="Runs/Models/$LABEL/$CKPT" --HeldOut="$HELD" --MaxCases="$CASES" | tee "Runs/EvalJob/$LABEL.txt"
+            else
+              bun run eval --Checkpoint="Runs/Models/$LABEL/$CKPT" --HeldOut="$HELD" --MaxCases="$CASES" --Baseline="$BASELINE" | tee "Runs/EvalJob/$LABEL.txt"
+            fi
+            echo "::endgroup::"
+            if [ -z "$BASELINE" ]; then BASELINE=$(ls -t Runs/Eval/*.json | head -1); echo "$BASELINE" > Runs/EvalJob/baseline.path; fi
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Evaluation job \`$EVAL_JOB_FILE\`"
+            echo
+            for F in Runs/EvalJob/*.txt; do
+              echo "### $(basename "$F" .txt)"
+              echo '```'
+              grep -v '^\[' "$F" | sed -n '/^suite v1/,$p'
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EvalJob-${{ github.run_id }}
+          path: |
+            Runs/Eval/*.json
+            Runs/EvalJob/*.txt
+          retention-days: 90
