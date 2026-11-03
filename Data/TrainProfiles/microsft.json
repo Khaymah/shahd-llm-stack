@@ -1,0 +1,18 @@
+{
+  "Note": "SFT-only: the micro base from train-model run 41522300940 (MicroChat2Base), fine-tuned with the owned mix plus the synthetic tools/multiturn/textbook conversations from Synthesize SFT run 41526777058 (grounded excluded after a quality review: answers often did not match the question's task). Compare its eval with MicroChat2 from the same base.",
+  "Spec": "Data/Spec.micro.json",
+  "Tokenizer": "micro",
+  "Embed": 256,
+  "Layers": 6,
+  "Heads": 4,
+  "Batch": 16,
+  "Epochs": 2,
+  "PretrainMinutes": 250,
+  "SftSteps": 800,
+  "Name": "MicroChat2Sft",
+  "BaseRunId": "41522300940",
+  "BaseArtifact": "MicroChat2",
+  "BaseCheckpoint": "MicroChat2Base.ckpt",
+  "SyntheticRunId": "41526777058",
+  "SyntheticGenerators": "tools,multiturn,textbook"
+}

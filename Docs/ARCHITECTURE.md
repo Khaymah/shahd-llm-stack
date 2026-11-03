@@ -33,13 +33,13 @@ The layers form an acyclic dependency graph, lowest to highest:
    tokens; and a corpus pipeline (license allowlist, MinHash near-dedup, quality filter, eval
    decontamination, fill-in-the-middle reformatting) assembled by `CorpusBuilder`.
 7. **Sampling + Checkpoints** (`Brain/Sampling/`, `Brain/Checkpoint/`) — temperature/top-k/top-p/min-p
-   sampling, autoregressive generation, a KV-cache that is numerically identical to the full forward
-   pass, and self-describing checkpoints (weights + optimizer state + RNG state + config + hash, with
+   sampling, autoregressive generation, a KV-cache for every architecture (Learned/RoPE, LayerNorm/RMSNorm,
+   ReLU/SwiGLU, MHA/GQA) that is numerically identical to the full forward pass, and self-describing checkpoints (weights + optimizer state + RNG state + config + hash, with
    a shape-mismatch hard-fail on load).
 8. **Safety** (`Brain/Safety/`) — a deterministic, controllable content-safety filter and resource
    limits, wrapped by `GuardedGenerate`, the single safe entry point for product generation.
 9. **SFT, Eval, RL** (`Brain/Sft/`, `Brain/Eval/`, `Brain/Rl/`) — a chat template with loss masking,
-   a task taxonomy and tool-use exemplars, pass@k with a sandboxed code executor, and RLVR via
+   a task taxonomy and tool-use exemplars, pass@k with a resource-capped code runner (not a sandbox; nonce-verified tests), and RLVR via
    rejection sampling.
 10. **Serving + Reasoning** (`Brain/Serving/`, `Brain/Reasoning/`) — a tool-calling protocol, a rich
     tool system with a central capability gate, a multi-step agent loop, an OpenAI-compatible server,
@@ -53,7 +53,7 @@ The layers form an acyclic dependency graph, lowest to highest:
 
 - **Multi-head attention uses per-head weight matrices summed**, which is mathematically equivalent to
   the concatenate-then-project formulation but avoids slice/concat ops on the tape.
-- **Weight tying** shares the token embedding with the language-model head (transpose), reducing
+- **Weight tying** shares the token embedding with the language-model head (`MatMulNT`, no transpose copy), reducing
   parameters and coupling input/output representations.
 - **Scaled residual initialization** shrinks residual-projection weights by `1/sqrt(2·layers)` for
   stable deep training.

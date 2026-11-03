@@ -1,0 +1,3 @@
+- add a coupon field to the checkout form
+- cache product lookups for 5 minutes
+- show the cart total with a currency symbol

@@ -18,6 +18,13 @@
 // last bits. That trade was made explicitly to buy the SIMD speedup; gradcheck's 1e-3 finite-difference
 // tolerance remains the correctness guard.
 
+// RUNTIME SAFETY: nothing here checks CPUID — these functions are only ever reached through the
+// dispatchers in matmul_dispatch.c, which route to the scalar copies in matmul_scalar.c when the
+// CPU lacks AVX2/FMA. Never call these directly from matmul.go (that would bring back the SIGILL).
+// The whole file compiles to nothing on non-x86 targets, where the scalar kernels are the only path.
+
+#if defined(__x86_64__) || defined(__i386__)
+
 #include <immintrin.h>
 #include <stddef.h>
 
@@ -445,3 +452,5 @@ void MatMulTnAvxF32(const float *A, const float *DOut, float *DB,
 }
 
 #pragma GCC pop_options
+
+#endif // x86

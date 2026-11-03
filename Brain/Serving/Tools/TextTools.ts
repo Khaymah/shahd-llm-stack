@@ -23,7 +23,7 @@ function HasQuantifier(Pattern: string): boolean {
   return /[+*{]/.test(Pattern);
 }
 
-// Run the regex in an isolated subprocess with a hard timeout (reusing the sandboxed executor). A
+// Run the regex in an isolated subprocess with a hard timeout (reusing the resource-capped executor). A
 // catastrophic pattern is KILLED at RegexTimeoutMs; the worst case is a bounded stall, never a hang.
 function RunFencedRegex(Pattern: string, Flags: string, Text: string, Action: string, Replacement: string): ToolResult {
   const Script =
@@ -34,11 +34,11 @@ function RunFencedRegex(Pattern: string, Flags: string, Text: string, Action: st
     `else { const G = Re.global ? Re : new RegExp(${JSON.stringify(Pattern)}, ${JSON.stringify(Flags)} + "g"); const M = [...Text.matchAll(G)].map((x) => x[0]); Out = { matches: M, count: M.length }; }\n` +
     `console.log(JSON.stringify(Out));`;
   const Result = RunCode(Script, RegexTimeoutMs);
-  if (!Result.Passed) return Err("pattern rejected: possible catastrophic backtracking (timed out or failed in the sandbox)");
+  if (!Result.Passed) return Err("pattern rejected: possible catastrophic backtracking (timed out or failed in the subprocess)");
   try {
     return JSON.parse(Result.Stdout.trim()) as ToolResult;
   } catch {
-    return Err("regex sandbox produced no parseable result");
+    return Err("regex subprocess produced no parseable result");
   }
 }
 

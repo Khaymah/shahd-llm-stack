@@ -7,8 +7,12 @@
 import type { Tensor } from "../Tensor/Tensor.ts";
 import type { SeededRng } from "../Random/SeededRng.ts";
 import type { ResolvedConfig } from "../Config/ConfigTypes.ts";
-import { MatMul, Transpose, Scale, CausalMask, SoftmaxRows, Add, ApplyRope } from "../Ops/OpsBarrel.ts";
+import { MatMul, MatMulNT, CausalSoftmax, Add, ApplyRope } from "../Ops/OpsBarrel.ts";
 import { InitWeight } from "./InitPolicy.ts";
+
+/** Receives each KV head's attention inputs as they are built: K AFTER RoPE and V, both [T, HeadDim].
+ *  The KV-cached decoder uses it to fill its cache from one batched forward (Sampling/CachedForward). */
+export type KvSink = (KvIndex: number, K: Tensor, V: Tensor) => void;
 
 export class MultiHeadAttention {
   WqHeads: Tensor[] = []; // [NumHeads] of [EmbedDim, HeadDim]
@@ -39,18 +43,19 @@ export class MultiHeadAttention {
     }
   }
 
-  Forward(X: Tensor): Tensor {
-    // Project each KV head once (shared by its query group), and transpose K ONCE here — under GQA the
-    // same K feeds GroupSize query heads, so re-transposing it inside the per-head loop was redundant
-    // work (and redundant autograd nodes) that partly cancelled GQA's own compute saving. The shared
-    // transpose node correctly accumulates gradient from every query head in the group.
-    const KsT: Tensor[] = [];
+  Forward(X: Tensor, Sink?: KvSink): Tensor {
+    // Project each KV head once; it is shared by its whole query group (GQA). Scores use MatMulNT
+    // (Q @ Kᵀ with K read row-wise), so no transposed copy of K is ever built — under GQA every
+    // query head of the group accumulates its dK straight into the shared K node.
+    const Ks: Tensor[] = [];
     const Vs: Tensor[] = [];
     for (let Kv = 0; Kv < this.KvHeads; Kv++) {
       let K = MatMul(X, this.WkHeads[Kv]);
       if (this.UseRope) K = ApplyRope(K, 0);
-      KsT.push(Transpose(K));
-      Vs.push(MatMul(X, this.WvHeads[Kv]));
+      const V = MatMul(X, this.WvHeads[Kv]);
+      Ks.push(K);
+      Vs.push(V);
+      Sink?.(Kv, K, V);
     }
 
     let Output: Tensor | null = null;
@@ -58,10 +63,8 @@ export class MultiHeadAttention {
       const KvIndex = Math.floor(H / this.GroupSize);
       let Q = MatMul(X, this.WqHeads[H]); // [T, HeadDim]
       if (this.UseRope) Q = ApplyRope(Q, 0);
-      let Scores = MatMul(Q, KsT[KvIndex]); // [T, T] — reuse the shared transpose
-      Scores = Scale(Scores, this.AttentionScale);
-      Scores = CausalMask(Scores);
-      const Weights = SoftmaxRows(Scores);
+      const Scores = MatMulNT(Q, Ks[KvIndex]); // [T, T] = Q @ Kᵀ
+      const Weights = CausalSoftmax(Scores, this.AttentionScale); // softmax(scale·scores) over j <= i
       const HeadOut = MatMul(Weights, Vs[KvIndex]); // [T, HeadDim]
       const Projected = MatMul(HeadOut, this.WoHeads[H]); // [T, EmbedDim]
       Output = Output === null ? Projected : Add(Output, Projected);

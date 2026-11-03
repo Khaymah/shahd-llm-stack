@@ -1,0 +1,13 @@
+{
+  "Note": "~2M params on ~8 MB, about 35 min end to end.",
+  "Spec": "Data/Spec.ci.json",
+  "Tokenizer": "ci",
+  "Embed": 128,
+  "Layers": 4,
+  "Heads": 4,
+  "Batch": 16,
+  "Epochs": 2,
+  "PretrainMinutes": 120,
+  "SftSteps": 400,
+  "Name": "CiChat"
+}

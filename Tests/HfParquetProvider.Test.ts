@@ -33,7 +33,9 @@ test("parquet provider streams a full shard and advances the cursor to the next 
     OpenShard: async () => ({ byteLength: 8, slice: async () => new ArrayBuffer(8) }),
     ReadRows: async (_F, Start, End) => Shards[0]!.slice(Start, End),
     WindowRows: 2,
-    OnCursor: (Shard, Offset) => Cursors.push({ Shard, Offset }),
+    OnCursor: (Shard, Offset) => {
+      Cursors.push({ Shard, Offset });
+    },
     OnRepoReady: async (_S, Docs) => { Batches.push(...Docs); },
   });
   expect(Provider.Semantics).toBe("streaming");
@@ -54,7 +56,9 @@ test("parquet provider resumes from a cursor and caps mid-shard without skipping
     WindowRows: 2,
     StartOffset: 4, // resume mid-shard
     MaxPerRun: 3, // cap after 3 docs
-    OnCursor: (Shard, Offset) => Cursors.push({ Shard, Offset }),
+    OnCursor: (Shard, Offset) => {
+      Cursors.push({ Shard, Offset });
+    },
     OnRepoReady: async (_S, Docs) => { Batches.push(...Docs); },
   });
   await Provider.Fetch("simple", 999);
@@ -71,9 +75,76 @@ test("parquet provider stops cleanly when the cursor is past the last shard", as
     OpenShard: async () => { throw new Error("should not download"); },
     ReadRows: async () => [],
     StartShard: 2, // past the end
-    OnCursor: (Shard, Offset) => Cursors.push({ Shard, Offset }),
+    OnCursor: (Shard, Offset) => {
+      Cursors.push({ Shard, Offset });
+    },
     OnRepoReady: async () => {},
   });
   const Ret = await Provider.Fetch("simple", 100);
   expect(Ret).toEqual([]); // nothing to do, no download attempted
+});
+
+// Ten rows with WindowRows=2 / BatchSize=2 => five batches; cursors are recorded per stored batch.
+function BatchedProvider(Sink: (Docs: SourceInput[]) => Promise<boolean | void>, Cursors: { Shard: number; Offset: number }[], Signal?: AbortController) {
+  const Data = Array.from({ length: 10 }, (_, I) => Row(I));
+  const Provider = CreateHfParquetProvider(WikiDumpSource, {
+    ListShards: async () => ["s0"],
+    OpenShard: async () => ({ byteLength: 8, slice: async () => new ArrayBuffer(8) }),
+    ReadRows: async (_F, Start, End) => Data.slice(Start, End),
+    WindowRows: 2,
+    BatchSize: 2,
+    OnCursor: (Shard, Offset) => {
+      Cursors.push({ Shard, Offset });
+    },
+    OnRepoReady: async (_S, Docs) => Sink(Docs),
+  });
+  return (): Promise<SourceInput[]> => Provider.Fetch("simple", 1000, Signal?.signal);
+}
+
+test("parquet provider reports the committed cursor after EVERY stored batch", async () => {
+  const Cursors: { Shard: number; Offset: number }[] = [];
+  await BatchedProvider(async () => true, Cursors)();
+  // One write per batch (offsets 2,4,6,8,10), then the final shard-done cursor.
+  expect(Cursors.slice(0, 5)).toEqual([2, 4, 6, 8, 10].map((Offset) => ({ Shard: 0, Offset })));
+  expect(Cursors.at(-1)).toEqual({ Shard: 1, Offset: 0 });
+});
+
+test("parquet provider holds the cursor at the start of a batch that was not fully stored", async () => {
+  const Cursors: { Shard: number; Offset: number }[] = [];
+  let Call = 0;
+  // Batch 2 (rows 2-3) partially fails; later batches succeed but the cursor must not pass the hole.
+  await BatchedProvider(async () => ++Call !== 2, Cursors)();
+  expect(Cursors[0]).toEqual({ Shard: 0, Offset: 2 });
+  expect(Cursors.slice(1).every((C) => C.Shard === 0 && C.Offset === 2)).toBe(true);
+  expect(Cursors.at(-1)).toEqual({ Shard: 0, Offset: 2 }); // shard NOT marked done
+});
+
+test("parquet provider persists the committed cursor before a sink error propagates", async () => {
+  const Cursors: { Shard: number; Offset: number }[] = [];
+  let Call = 0;
+  const Run = BatchedProvider(async () => {
+    if (++Call === 3) throw new Error("store down");
+    return true;
+  }, Cursors);
+  let Failure: Error | null = null;
+  try {
+    await Run();
+  } catch (Caught) {
+    Failure = Caught as Error;
+  }
+  expect(Failure?.message).toBe("store down");
+  expect(Cursors.at(-1)).toEqual({ Shard: 0, Offset: 4 }); // after batches 1-2, before the failed 3rd
+});
+
+test("parquet provider stops at a batch boundary and reports the committed cursor", async () => {
+  const Cursors: { Shard: number; Offset: number }[] = [];
+  const Stop = new AbortController();
+  let Call = 0;
+  const Ret = await BatchedProvider(async () => {
+    if (++Call === 2) Stop.abort(); // Stop pressed while batch 2 is being stored
+    return true;
+  }, Cursors, Stop)();
+  expect(Ret).toEqual([]);
+  expect(Call).toBe(2); // batch 2 completed; no batch 3
+  expect(Cursors.at(-1)).toEqual({ Shard: 0, Offset: 4 }); // resumes right after batch 2
 });

@@ -5,8 +5,29 @@
 
 import { z } from "zod";
 
+// z.number() already rejects NaN; .finite() additionally rejects ±Infinity, which would otherwise
+// pass .positive()/.min(0) and poison every downstream multiply (an Infinity LR or Epsilon is a
+// NaN loss one step later). .int() implies finiteness, so integer fields need no extra guard.
 const PositiveInt = z.number().int().positive();
+const PositiveFinite = z.number().finite().positive();
 const UnitInterval = z.number().min(0).max(1);
+// Adam moment decay: must be STRICTLY inside (0, 1). Beta = 1 makes the bias correction
+// 1 - Beta^t = 0 (division by zero -> Infinity/NaN update); Beta = 0 disables the moment entirely.
+const AdamBeta = z.number().gt(0, "must be > 0").lt(1, "must be < 1 (Beta = 1 divides by zero in the bias correction)");
+
+// Dropout is part of the config contract (and checkpoints carry a Dropout RNG stream), but no op in
+// Nn/ or Ops/ consumes it yet. Accepting a non-zero value would silently train WITHOUT dropout, so
+// the schema refuses anything but 0 until it is implemented.
+export const DropoutNotImplementedMessage = "Dropout is reserved and not implemented yet (must be 0)";
+// The explicit `: boolean` stops TS from inferring a type predicate (Value is 0), which would narrow
+// the inferred config type to the literal 0 — the field stays a number knob for when it is built.
+/** First step of the WSD decay window: the last ceil(DecayFraction * MaxSteps) steps decay. The ONE
+ *  home for this boundary — the schedule (Optim/LrSchedule.ts) and the validation below share it. */
+export function WsdDecayStart(MaxSteps: number, DecayFraction: number): number {
+  return MaxSteps - Math.max(1, Math.ceil(DecayFraction * MaxSteps));
+}
+
+const ReservedDropout = z.number().refine((Value): boolean => Value === 0, { message: DropoutNotImplementedMessage });
 
 export const ModelSchema = z.object({
   EmbedDim: PositiveInt, // hidden width (a.k.a. NEMB)
@@ -14,11 +35,11 @@ export const ModelSchema = z.object({
   NumHeads: PositiveInt, // attention heads; must divide EmbedDim (see superRefine)
   BlockSize: PositiveInt, // context length in tokens
   VocabSize: PositiveInt, // token vocabulary size (must match the tokenizer)
-  MlpRatio: z.number().positive(), // MLP hidden = EmbedDim * MlpRatio (usually 4)
-  LayerNormEps: z.number().positive(),
-  Dropout: UnitInterval,
+  MlpRatio: PositiveFinite, // MLP hidden = EmbedDim * MlpRatio (usually 4)
+  LayerNormEps: PositiveFinite,
+  Dropout: ReservedDropout, // reserved knob: only 0 is accepted until dropout is implemented
   WeightTying: z.boolean(), // tie token embedding with the LM head
-  InitScale: z.number().positive(), // stddev for randn weight init
+  InitScale: PositiveFinite, // stddev for randn weight init
   UseScaledResidualInit: z.boolean(), // scale residual-projection init by 1/sqrt(2*NumLayers)
   // Architecture staples (Phase-2 lock). Defaults keep Phase-1 behavior; modern stack opts in.
   PositionScheme: z.enum(["Learned", "Rope"]), // learned absolute vs rotary positions
@@ -29,19 +50,26 @@ export const ModelSchema = z.object({
 
 export const OptimizerSchema = z.object({
   Kind: z.enum(["Adam", "AdamW"]),
-  LearningRate: z.number().positive(),
-  Beta1: UnitInterval,
-  Beta2: UnitInterval,
-  Epsilon: z.number().positive(),
-  WeightDecay: z.number().min(0), // decoupled decay; used only by AdamW
-  GradClipNorm: z.number().positive(), // global-norm clip threshold
+  LearningRate: PositiveFinite,
+  Beta1: AdamBeta,
+  Beta2: AdamBeta,
+  Epsilon: PositiveFinite,
+  WeightDecay: z.number().finite().min(0), // decoupled decay; used only by AdamW
+  GradClipNorm: PositiveFinite, // global-norm clip threshold
 });
 
+// WSD decay window: strictly inside (0, 0.5) of MaxSteps — 0 would be no decay at all (a constant LR
+// that ends at the peak), and a window of half the run or more is no longer "stable then decay".
+const WsdDecayFraction = z.number().gt(0, "must be > 0").lt(0.5, "must be < 0.5 (the decay is the run's TAIL)");
+
 export const ScheduleSchema = z.object({
-  Kind: z.enum(["Cosine", "Constant"]),
+  // Cosine: warmup -> cosine decay to the floor. Constant: the peak throughout. Wsd: warmup -> stable
+  // peak -> linear decay over the last DecayFraction of MaxSteps (resumable/extendable long runs).
+  Kind: z.enum(["Cosine", "Constant", "Wsd"]),
   WarmupSteps: z.number().int().min(0),
   MaxSteps: PositiveInt,
   MinLrRatio: UnitInterval, // floor LR as a fraction of the peak, at the end of decay
+  DecayFraction: WsdDecayFraction, // Wsd only: share of MaxSteps spent decaying (the tail)
 });
 
 export const TrainingSchema = z.object({
@@ -145,6 +173,13 @@ export const ShahdConfigSchema = z
         code: z.ZodIssueCode.custom,
         path: ["Schedule", "WarmupSteps"],
         message: `WarmupSteps (${Config.Schedule.WarmupSteps}) cannot exceed MaxSteps (${Config.Schedule.MaxSteps}).`,
+      });
+    }
+    if (Config.Schedule.Kind === "Wsd" && Config.Schedule.WarmupSteps > WsdDecayStart(Config.Schedule.MaxSteps, Config.Schedule.DecayFraction)) {
+      Ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["Schedule", "WarmupSteps"],
+        message: `Wsd: WarmupSteps (${Config.Schedule.WarmupSteps}) runs into the decay window (starts at step ${WsdDecayStart(Config.Schedule.MaxSteps, Config.Schedule.DecayFraction)}); lower WarmupSteps or DecayFraction.`,
       });
     }
     if (Config.Tokenizer.Kind === "Bpe" && Config.Tokenizer.MergesPath === undefined) {

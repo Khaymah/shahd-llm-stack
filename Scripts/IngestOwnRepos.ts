@@ -23,3 +23,4 @@ console.log(`store=${Kind} | own repos: ${Roots.join(", ")}`);
 const Stats = await IngestFromWeb([Provider], [""], Store, new Date().toISOString());
 console.log(`\ningested ${Stats.Ingested} files -> Filtered=${Stats.ByTier.Filtered} Rejected=${Stats.ByTier.Rejected}\n`);
 console.log(RenderReportText(BuildReport(await Store.All())));
+await Store.Close?.(); // release the Postgres pool, otherwise the open sockets keep the process alive forever

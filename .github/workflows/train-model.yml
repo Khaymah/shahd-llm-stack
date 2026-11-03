@@ -1,0 +1,235 @@
+# Train a Shahd model end-to-end on a GitHub runner and publish it as a downloadable artifact (and as a
+# GitHub Release when run on a `model-*v*` tag). Same pipeline a developer runs locally:
+#   ingest-spec -> train:bpe -> pretrain (epoch-capped, time-capped) -> SFT -> eval -> artifact.
+#
+# Sizes come from a training profile in Data/TrainProfiles/<profile>.json (spec, width, depth, epochs,
+# SFT steps, name, pretrain time cap). The profile is picked, in order, from:
+#   - the `profile` input of a manual run (Actions -> Train model -> Run workflow),
+#   - the branch name `model/<profile>-<anything>` (e.g. model/micro-rc1),
+#   - the tag name `model-<profile>-v<version>` (e.g. model-micro-v0.3.0; `model-v*` = the ci profile),
+#   - otherwise `ci`.
+# Manual-run inputs left empty fall back to the profile's values.
+#
+# The runner has 4 vCPUs and a 6 h job limit. `ci` finishes in ~35 min; `micro` is sized to ~4.5 h and
+# its pretrain stops gracefully at PretrainMinutes (checkpoint saved at the exact step) so the SFT and
+# eval steps always get their time. "Run workflow" appears once this file is on the default branch.
+name: Train model
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Training profile from Data/TrainProfiles (ci, micro)"
+        default: "ci"
+      epochs:
+        description: "Override: pretraining epochs (empty = profile)"
+        default: ""
+      embed:
+        description: "Override: embedding width (empty = profile)"
+        default: ""
+      layers:
+        description: "Override: transformer layers (empty = profile)"
+        default: ""
+      sft_steps:
+        description: "Override: SFT steps (empty = profile)"
+        default: ""
+      name:
+        description: "Override: model name (empty = profile)"
+        default: ""
+      synthetic_run_id:
+        description: "Run id of a 'Synthesize SFT' run whose SyntheticSft artifact is imported before SFT (empty = profile's SyntheticRunId, or none)"
+        default: ""
+  push:
+    tags: ["model-v*", "model-*-v*"] # also publishes a GitHub Release
+    branches: ["model/**"] # trains and uploads the artifact only
+
+concurrency:
+  group: train-model-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: postgres://shahd:shahd@localhost:5432/shahd
+
+jobs:
+  train:
+    name: ingest → tokenizer → pretrain → SFT → eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions:
+      contents: write # release upload on model tags
+      actions: read # download the SyntheticSft artifact from another run
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shahd
+          POSTGRES_PASSWORD: shahd
+          POSTGRES_DB: shahd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shahd"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the training profile
+        env:
+          IN_PROFILE: ${{ github.event.inputs.profile }}
+          IN_EPOCHS: ${{ github.event.inputs.epochs }}
+          IN_EMBED: ${{ github.event.inputs.embed }}
+          IN_LAYERS: ${{ github.event.inputs.layers }}
+          IN_SFT: ${{ github.event.inputs.sft_steps }}
+          IN_NAME: ${{ github.event.inputs.name }}
+          IN_SYNTH: ${{ github.event.inputs.synthetic_run_id }}
+        run: |
+          PROFILE="$IN_PROFILE"
+          if [ -z "$PROFILE" ]; then
+            case "$GITHUB_REF" in
+              refs/heads/model/*) PROFILE="${GITHUB_REF#refs/heads/model/}"; PROFILE="${PROFILE%%-*}"; PROFILE="${PROFILE%%/*}" ;;
+              refs/tags/model-v*) PROFILE="ci" ;;
+              refs/tags/model-*) PROFILE="${GITHUB_REF#refs/tags/model-}"; PROFILE="${PROFILE%%-v*}" ;;
+            esac
+          fi
+          [ -f "Data/TrainProfiles/${PROFILE:-ci}.json" ] || { echo "no profile Data/TrainProfiles/${PROFILE}.json; using ci"; PROFILE=ci; }
+          P="Data/TrainProfiles/${PROFILE:-ci}.json"
+          pick() { jq -r ".$1" "$P"; }
+          {
+            echo "PROFILE=${PROFILE:-ci}"
+            echo "FOUNDRY_SPEC=$(pick Spec)"
+            echo "TOKENIZER_VERSION=$(pick Tokenizer)"
+            echo "HEADS=$(pick Heads)"
+            echo "BATCH=$(pick Batch)"
+            echo "PRETRAIN_MINUTES=$(pick PretrainMinutes)"
+            echo "EPOCHS=${IN_EPOCHS:-$(pick Epochs)}"
+            echo "EMBED=${IN_EMBED:-$(pick Embed)}"
+            echo "LAYERS=${IN_LAYERS:-$(pick Layers)}"
+            echo "SFT_STEPS=${IN_SFT:-$(pick SftSteps)}"
+            echo "MODEL_NAME=${IN_NAME:-$(pick Name)}"
+            SYNTH="${IN_SYNTH:-$(jq -r '.SyntheticRunId // ""' "$P")}"
+            echo "SYNTHETIC_RUN_ID=$SYNTH"
+            echo "SYNTHETIC_GENERATORS=$(jq -r '.SyntheticGenerators // ""' "$P")"
+            # SFT-only mode: start from the base checkpoint in an earlier train-model run's artifact
+            # instead of pretraining again (profile keys BaseRunId / BaseArtifact / BaseCheckpoint).
+            echo "BASE_RUN_ID=$(jq -r '.BaseRunId // ""' "$P")"
+            echo "BASE_ARTIFACT=$(jq -r '.BaseArtifact // ""' "$P")"
+            echo "BASE_CHECKPOINT=$(jq -r '.BaseCheckpoint // ""' "$P")"
+          } >> "$GITHUB_ENV"
+          echo "profile: $P"; cat "$P"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: GoKernels/go.mod
+      - run: bun install --frozen-lockfile
+
+      - name: Build the Go/C FFI kernel (AVX2 with scalar fallback)
+        working-directory: GoKernels/ffi
+        run: go build -buildmode=c-shared -o ../matmul.dll ./
+
+      - name: Create the Foundry schema
+        run: bun run foundry:migrate
+
+      - name: Collect the corpus from the spec (explicit permissive repos)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status
+
+      - name: Download the SyntheticSft artifact (when a synthesis run is given)
+        if: env.SYNTHETIC_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: SyntheticSft
+          path: Runs/SyntheticSft
+          run-id: ${{ env.SYNTHETIC_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import the synthetic conversations into documents_conversation
+        if: env.SYNTHETIC_RUN_ID != ''
+        run: bun run sft:import Runs/SyntheticSft/SyntheticSft.jsonl ${SYNTHETIC_GENERATORS:+--Generators=$SYNTHETIC_GENERATORS}
+
+      - name: Download the base model (SFT-only profile)
+        if: env.BASE_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BASE_ARTIFACT }}
+          path: Runs/Base
+          run-id: ${{ env.BASE_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Register the downloaded base and its tokenizer
+        if: env.BASE_RUN_ID != ''
+        run: |
+          cp Runs/Base/Tokenizer.$TOKENIZER_VERSION.json Data/
+          bun run Scripts/RegisterCheckpoint.ts --File=Runs/Base/$BASE_CHECKPOINT --Name=${MODEL_NAME}Base
+
+      - name: Train the tokenizer from the spec mix
+        if: env.BASE_RUN_ID == ''
+        run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=$TOKENIZER_VERSION --Force
+
+      - name: Pretrain the base (epoch-capped, stops gracefully at the time cap)
+        if: env.BASE_RUN_ID == ''
+        run: |
+          mkdir -p Runs
+          STOP=Runs/stop-pretrain
+          rm -f "$STOP"
+          ( sleep $((PRETRAIN_MINUTES * 60)) && touch "$STOP" ) &
+          bun run Scripts/TrainOnFoundry.ts --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.$TOKENIZER_VERSION.json \
+            --Epochs=$EPOCHS --EmbedDim=$EMBED --Layers=$LAYERS --Heads=$HEADS --Batch=$BATCH \
+            --Workers=4 --Precision=F32 --Name=${MODEL_NAME}Base --StopFile=$STOP
+          if [ -f "$STOP" ]; then echo "::warning::pretrain hit the ${PRETRAIN_MINUTES}-minute cap and was stopped early (checkpoint saved at that step)"; fi
+
+      - name: SFT the chat model from the base
+        run: |
+          bun run Scripts/TrainSftChat.ts --From=${MODEL_NAME}Base --Name=$MODEL_NAME \
+            --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.$TOKENIZER_VERSION.json --Steps=$SFT_STEPS \
+            --EmbedDim=$EMBED --Layers=$LAYERS --Heads=$HEADS --Batch=8 --Workers=4 --Precision=F32 \
+            --CodeSamples=600 --Arithmetic=600 --Thinking=300 --CodeConvs=300 --MultiTurn=600 \
+            --ConvCount=20000
+
+      - name: Evaluate (results stored in the checkpoint's Meta.Eval)
+        run: |
+          bun run eval --Checkpoint=${MODEL_NAME}Base --MaxCases=8 --HeldOutDocs=40 --WriteMeta
+          bun run eval --Checkpoint=$MODEL_NAME --MaxCases=8 --HeldOutDocs=40 \
+            --Baseline=Checkpoints/${MODEL_NAME}Base.ckpt --WriteMeta
+
+      - name: Write the model card
+        run: |
+          mkdir -p Release
+          cp Checkpoints/${MODEL_NAME}.ckpt Checkpoints/${MODEL_NAME}Base.ckpt Data/Tokenizer.$TOKENIZER_VERSION.json Release/
+          cp Runs/Eval/*.json Release/
+          {
+            echo "# $MODEL_NAME"
+            echo
+            echo "Trained by the train-model workflow (run ${{ github.run_id }}, commit ${{ github.sha }})."
+            echo "Profile: $PROFILE · spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · heads $HEADS · pretrain epochs $EPOCHS · SFT steps $SFT_STEPS."
+            echo "Synthetic SFT: ${SYNTHETIC_RUN_ID:-none} (run id of the Synthesize SFT workflow)${SYNTHETIC_GENERATORS:+, generators $SYNTHETIC_GENERATORS}."
+            echo "Base: ${BASE_RUN_ID:+downloaded from run $BASE_RUN_ID ($BASE_CHECKPOINT)}${BASE_RUN_ID:-pretrained in this run}."
+            echo
+            echo '```bash'
+            echo "bun run serve --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # OpenAI-compatible on 127.0.0.1:8080"
+            echo "bun run eval  --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # the frozen suite"
+            echo "FOUNDRY_CHECKPOINT=Checkpoints/${MODEL_NAME}.ckpt bun run foundry:dashboard   # chat with it"
+            echo '```'
+          } > Release/README.md
+          ls -la Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MODEL_NAME }}
+          path: Release/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish a GitHub Release (model tags only)
+        if: startsWith(github.ref, 'refs/tags/model-')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRE=""; case "$GITHUB_REF_NAME" in *-rc*|*-alpha*|*-beta*) PRE="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" Release/* $PRE --title "$MODEL_NAME $GITHUB_REF_NAME" --notes-file Release/README.md

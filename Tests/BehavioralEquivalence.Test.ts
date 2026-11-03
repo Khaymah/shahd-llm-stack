@@ -10,7 +10,9 @@ import { CharTokenizer } from "../Brain/Tokenizer/CharTokenizer.ts";
 import { TrainValSplit } from "../Brain/Data/TrainValSplit.ts";
 import { InMemoryDataLoader } from "../Brain/Data/DataLoader.ts";
 import { Shahd } from "../Brain/Nn/Shahd.ts";
-import { CreateOptimizer, ClipGradGlobalNorm, ComputeLr } from "../Brain/Optim/OptimBarrel.ts";
+import { CreateOptimizer, ComputeLr } from "../Brain/Optim/OptimBarrel.ts";
+import { AssertFiniteGradNorm, ClipGradsChecked } from "../Brain/Training/RunTrainingSteps.ts";
+import { Tensor } from "../Brain/Tensor/Tensor.ts";
 import { AccumulateGradients } from "../Brain/Training/GradAccumulation.ts";
 import { EvalLoss } from "../Brain/Training/EvalLoop.ts";
 
@@ -40,7 +42,7 @@ test("the full training pipeline drives eval loss clearly down", () => {
   const Before = EvalLoss(Model, ValLoader, 10).Loss;
   for (let Step = 0; Step < Config.Schedule.MaxSteps; Step++) {
     AccumulateGradients(Model, Optimizer, TrainLoader, Config.Training.BatchSize);
-    ClipGradGlobalNorm(Optimizer.Params, Config.Optimizer.GradClipNorm);
+    ClipGradsChecked(Optimizer.Params, Config.Optimizer.GradClipNorm, Step); // the guarded clip every loop uses
     Optimizer.Step(ComputeLr(Step, Config));
   }
   const After = EvalLoss(Model, ValLoader, 10).Loss;
@@ -48,3 +50,16 @@ test("the full training pipeline drives eval loss clearly down", () => {
   expect(Before).toBeGreaterThan(1.5); // random init starts high
   expect(After).toBeLessThan(Before * 0.6); // loss dropped substantially
 }, 30_000);
+
+test("the non-finite gradient guard stops a step on NaN/Infinity and passes finite norms through", () => {
+  expect(AssertFiniteGradNorm(3.5, 7)).toBe(3.5);
+  expect(() => AssertFiniteGradNorm(Number.NaN, 7)).toThrow(/Non-finite gradient norm at step 7: NaN/);
+  expect(() => AssertFiniteGradNorm(Number.POSITIVE_INFINITY, 8)).toThrow(/step 8: Infinity/);
+
+  const Param = new Tensor(1, 2);
+  Param.Grad[0] = 3;
+  Param.Grad[1] = 4;
+  expect(ClipGradsChecked([Param], 100, 0)).toBe(5); // pre-clip norm returned for logging
+  Param.Grad[1] = Number.NaN;
+  expect(() => ClipGradsChecked([Param], 100, 1)).toThrow(/step 1: NaN/);
+});

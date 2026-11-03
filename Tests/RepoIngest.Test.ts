@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createTarGzip } from "nanotar";
@@ -176,7 +176,8 @@ test("NOASSERTION license is resolved from the real LICENSE: permissive -> detec
     ],
   });
   const BytesFetcher: FetchBytes = async (Url) => (Url.includes("acme/mitrepo") ? Tar1 : Tar2);
-  const MitText = 'MIT License\n\nCopyright (c) 2025 X\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.\n';
+  // Full canonical MIT (a truncated disclaimer now fails the template-coverage gate by design).
+  const MitText = readFileSync(join(import.meta.dir, "Fixtures", "Licenses", "Clean", "Mit.txt"), "utf8");
   const Provider = CreateGitHubRepoProvider({
     Http,
     FetchBytes: BytesFetcher,
@@ -216,4 +217,86 @@ test("local repo provider learns from OUR own code as 'owned' (trained on despit
   } finally {
     rmSync(Root, { recursive: true, force: true });
   }
+});
+
+// ---- Per-file license headers (vendored copyleft inside a permissive repo) ----
+
+const GplHeader =
+  "/*\n * ringbuf.c - lock-free ring buffer\n *\n * Copyright (C) 2009 Some Kernel Hacker\n *\n" +
+  " * This program is free software; you can redistribute it and/or modify\n * it under the terms of the GNU General Public License as published by\n" +
+  " * the Free Software Foundation; either version 2 of the License, or\n * (at your option) any later version.\n */\n";
+
+// A substantive C file (>300 chars of real code after the header is stripped).
+function CCode(Name: string): string {
+  return `#include <stdlib.h>\n#include <string.h>\n\nstruct ${Name} {\n  unsigned char *data;\n  size_t head;\n  size_t tail;\n  size_t size;\n};\n\nint ${Name}_push(struct ${Name} *rb, unsigned char value) {\n  size_t next = (rb->head + 1) % rb->size;\n  if (next == rb->tail) return -1;\n  rb->data[rb->head] = value;\n  rb->head = next;\n  return 0;\n}\n\nint ${Name}_pop(struct ${Name} *rb, unsigned char *out) {\n  if (rb->head == rb->tail) return -1;\n  *out = rb->data[rb->tail];\n  rb->tail = (rb->tail + 1) % rb->size;\n  return 0;\n}\n`;
+}
+
+test("a GPL-headed .c file inside an MIT repo is Rejected with file_license_conflict (header read before stripping)", async () => {
+  const RepoTar = await Tar([
+    ...["A", "B", "C", "D", "E"].map((N) => ({ name: `mixed-sha/src/${N}.ts`, data: Code(N) })),
+    { name: "mixed-sha/src/ringbuf.c", data: GplHeader + CCode("ringbuf") },
+  ]);
+  const Http: HttpJson = async () => ({ items: [{ full_name: "acme/mixed", default_branch: "main", license: { spdx_id: "MIT" } }] });
+  const Logs: string[] = [];
+  const Provider = CreateGitHubRepoProvider({ Http, FetchBytes: async () => RepoTar, MinLevel: "medium", Log: (M) => Logs.push(M) });
+  const Store = new InMemoryDocumentStore();
+  await IngestFromWeb([Provider], ["q"], Store, "2026-07-13T00:00:00.000Z");
+  const Docs = await Store.All();
+  const Gpl = Docs.filter((D) => D.Provenance.endsWith("/src/ringbuf.c"));
+  expect(Gpl.length).toBe(1);
+  expect(Gpl[0].Tier).toBe("Rejected");
+  expect(Gpl[0].RejectReason).toContain("file_license_conflict");
+  expect(Gpl[0].RejectReason).toContain("GNU General Public License");
+  expect(Gpl[0].Content).toContain("GNU General Public License"); // evidence kept, not stripped away
+  const Rest = Docs.filter((D) => !D.Provenance.endsWith("/src/ringbuf.c"));
+  expect(Rest.length).toBe(5);
+  expect(Rest.every((D) => D.License === "MIT" && D.Tier === "Filtered")).toBe(true); // repo's own files unaffected
+  expect(Logs.some((L) => L.includes("acme/mixed: 1 file(s) with a conflicting license header"))).toBe(true);
+});
+
+test("a permissive SPDX header differing from a permissive repo license becomes the file's license", async () => {
+  const RepoTar = await Tar([
+    ...["A", "B", "C", "D"].map((N) => ({ name: `spdx-sha/src/${N}.ts`, data: Code(N) })),
+    { name: "spdx-sha/src/Vendored.ts", data: "// SPDX-License-Identifier: Apache-2.0\n" + Code("Vendored") },
+  ]);
+  const Http: HttpJson = async () => ({ items: [{ full_name: "acme/spdx", default_branch: "main", license: { spdx_id: "MIT" } }] });
+  const Docs = await CreateGitHubRepoProvider({ Http, FetchBytes: async () => RepoTar, MinLevel: "medium" }).Fetch("q", 5);
+  expect(Docs.find((D) => D.Provenance.endsWith("/src/Vendored.ts"))?.License).toBe("Apache-2.0");
+  expect(Docs.filter((D) => D.License === "MIT").length).toBe(4);
+});
+
+test("a per-file permissive SPDX header never upgrades an unresolved repo license", async () => {
+  const RepoTar = await Tar(["A", "B", "C", "D", "E"].map((N) => ({ name: `nr-sha/src/${N}.ts`, data: "// SPDX-License-Identifier: MIT\n" + Code(N) })));
+  const Http: HttpJson = async () => ({ items: [{ full_name: "acme/rider", default_branch: "main", license: { spdx_id: "NOASSERTION" } }] });
+  const Rider = readFileSync(join(import.meta.dir, "Fixtures", "Licenses", "Riders", "MitNoCommercialNoMl.txt"), "utf8");
+  const Provider = CreateGitHubRepoProvider({ Http, FetchBytes: async () => RepoTar, MinLevel: "medium", FetchLicense: async () => ({ Spdx: "NOASSERTION", Text: Rider }) });
+  const Docs = await Provider.Fetch("q", 5);
+  expect(Docs.length).toBe(5);
+  expect(Docs.every((D) => D.License === "NOASSERTION")).toBe(true); // rider LICENSE stays unresolved -> Rejected
+});
+
+test("local repo provider: a GPL-headed vendored file in OUR repo is not 'owned' and is Rejected", async () => {
+  const Root = mkdtempSync(join(tmpdir(), "shahd-repo-gpl-"));
+  try {
+    mkdirSync(join(Root, "src"), { recursive: true });
+    for (const N of ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]) writeFileSync(join(Root, "src", `${N}.ts`), Code(N));
+    writeFileSync(join(Root, "src", "ringbuf.c"), GplHeader + CCode("ringbuf"));
+    const Store = new InMemoryDocumentStore();
+    const Provider = CreateLocalRepoProvider({ Roots: [Root], License: "proprietary", MinLevel: "medium" });
+    await IngestFromWeb([Provider], [""], Store, "2026-07-13T00:00:00.000Z");
+    const Docs = await Store.All();
+    const Gpl = Docs.find((D) => D.Provenance.endsWith("/src/ringbuf.c"));
+    expect(Gpl?.Tier).toBe("Rejected");
+    expect(Gpl?.RejectReason).toContain("file_license_conflict");
+    expect(Docs.filter((D) => D.Origin === "owned").length).toBe(5);
+  } finally {
+    rmSync(Root, { recursive: true, force: true });
+  }
+});
+
+test("vendored / third-party / build-output directories are excluded", () => {
+  for (const Dir of ["external", "extern", "3rdparty", "third-party", "thirdparty", "third_party", "contrib", "node_modules", "bower_components", "Pods", "Carthage", ".yarn", "dist", "build", "out", "target", "vendor"]) {
+    expect({ Dir, Kept: IsSubstantiveCodePath(`${Dir}/lib/zlib.c`) }).toEqual({ Dir, Kept: false });
+  }
+  expect(IsSubstantiveCodePath("src/lib/zlib.c")).toBe(true);
 });

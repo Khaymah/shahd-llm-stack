@@ -1,0 +1,212 @@
+# Generate synthetic SFT conversations with a LOCAL open-weights teacher (Plan: Brain-Strengthening §2.3,
+# §8 — no commercial API). N parallel shards each: collect the CI corpus (the grounding code), start
+# llama.cpp's llama-server on 127.0.0.1:8081 with a pinned GGUF, and run `sft:synthesize` on its own
+# disjoint shard (--Shard=k/N) until it reaches its count or its time budget. A final job merges the
+# shards (concatenate + exact dedup) into ONE artifact, `SyntheticSft`, with a stats summary. Import it
+# before SFT with `bun run sft:import SyntheticSft.jsonl` (see train-model.yml).
+#
+# The teacher's binaries and weights only ever exist on these ephemeral runners. The textbook generator
+# executes teacher-written code (Brain/Eval/CodeExecutor.ts — resource-capped, not a sandbox), which is
+# why checkout does not persist credentials and no secret is in the synthesize step's environment.
+name: Synthesize SFT
+
+on:
+  workflow_dispatch:
+    inputs:
+      items_per_shard:
+        description: "Accepted conversations wanted per shard"
+        default: "400"
+      shards:
+        description: "Parallel shards (1-16)"
+        default: "8"
+      gguf_repo:
+        description: "Hugging Face repo of the teacher GGUF (open weights, license must allow training on outputs)"
+        default: "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF"
+      gguf_file:
+        description: "GGUF file in that repo"
+        default: "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
+      budget:
+        description: "Token budget per rendered conversation (<= the SFT context; the ci and micro profiles train at 256, so 240 leaves margin for tokenizer differences)"
+        default: "240"
+      minutes:
+        description: "Synthesis time budget per shard in minutes (<= 280: setup takes ~30 min and one in-flight item may overrun by up to ~35 min)"
+        default: "270"
+  push:
+    branches: ["sft/**"] # a push to an `sft/<name>` branch runs with the defaults
+
+concurrency:
+  group: synthesize-sft-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: postgres://shahd:shahd@localhost:5432/shahd
+  FOUNDRY_SPEC: Data/Spec.ci.json
+  ITEMS: ${{ github.event.inputs.items_per_shard || '400' }}
+  SHARDS: ${{ github.event.inputs.shards || '8' }}
+  GGUF_REPO: ${{ github.event.inputs.gguf_repo || 'Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF' }}
+  GGUF_FILE: ${{ github.event.inputs.gguf_file || 'qwen2.5-coder-1.5b-instruct-q4_k_m.gguf' }}
+  MINUTES: ${{ github.event.inputs.minutes || '270' }}
+  BUDGET: ${{ github.event.inputs.budget || '240' }}
+  # Pinned llama.cpp release (ubuntu x64 CPU build). Bump deliberately; the cache key follows it.
+  LLAMA_TAG: b6000
+  SHAHD_TEACHER_URL: http://127.0.0.1:8081
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      total: ${{ steps.plan.outputs.total }}
+    steps:
+      - id: plan
+        run: |
+          N="$SHARDS"
+          if ! [[ "$N" =~ ^[0-9]+$ ]] || [ "$N" -lt 1 ] || [ "$N" -gt 16 ]; then echo "shards must be 1..16 (got '$N')"; exit 1; fi
+          if ! [[ "$ITEMS" =~ ^[0-9]+$ ]] || [ "$ITEMS" -lt 1 ]; then echo "items_per_shard must be a positive integer"; exit 1; fi
+          if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -gt 280 ]; then echo "minutes must be an integer <= 280"; exit 1; fi
+          if ! [[ "$BUDGET" =~ ^[0-9]+$ ]] || [ "$BUDGET" -lt 64 ]; then echo "budget must be an integer >= 64"; exit 1; fi
+          echo "shards=$(jq -cn --argjson n "$N" '[range(0; $n)]')" >> "$GITHUB_OUTPUT"
+          echo "total=$N" >> "$GITHUB_OUTPUT"
+
+  synthesize:
+    name: shard ${{ matrix.shard }}/${{ needs.plan.outputs.total }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # < 6 h job limit; the synthesizer stops itself at $MINUTES and flushes
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shahd
+          POSTGRES_PASSWORD: shahd
+          POSTGRES_DB: shahd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shahd"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile
+
+      - name: Create the Foundry schema
+        run: bun run foundry:migrate
+
+      - name: Collect the CI corpus (grounding code)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status
+
+      - name: Cache llama.cpp ${{ env.LLAMA_TAG }}
+        id: llama-cache
+        uses: actions/cache@v4
+        with:
+          path: .llama
+          key: llama-cpp-${{ env.LLAMA_TAG }}-ubuntu-x64
+
+      - name: Fetch llama.cpp ${{ env.LLAMA_TAG }} (ubuntu x64)
+        if: steps.llama-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .llama
+          curl -fsSL --retry 5 -o .llama/llama.zip \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.zip"
+          unzip -q .llama/llama.zip -d .llama
+          rm .llama/llama.zip
+
+      - name: Cache the teacher GGUF
+        id: gguf-cache
+        uses: actions/cache@v4
+        with:
+          path: .teacher
+          key: gguf-${{ env.GGUF_REPO }}-${{ env.GGUF_FILE }}
+
+      - name: Fetch the teacher GGUF
+        if: steps.gguf-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .teacher
+          curl -fsSL --retry 5 -o ".teacher/$GGUF_FILE" "https://huggingface.co/${GGUF_REPO}/resolve/main/${GGUF_FILE}"
+          ls -la .teacher
+
+      - name: Start llama-server on 127.0.0.1:8081
+        run: |
+          SERVER="$(find .llama -type f -name llama-server | head -n 1)"
+          if [ -z "$SERVER" ]; then echo "llama-server not found in the release archive"; find .llama -maxdepth 3; exit 1; fi
+          chmod +x "$SERVER"
+          export LD_LIBRARY_PATH="$(dirname "$SERVER"):${LD_LIBRARY_PATH:-}"
+          nohup "$SERVER" -m ".teacher/$GGUF_FILE" --host 127.0.0.1 --port 8081 -c 4096 -np 1 -t "$(nproc)" > llama-server.log 2>&1 &
+          for I in $(seq 1 120); do
+            if curl -sf http://127.0.0.1:8081/health > /dev/null; then echo "teacher ready after ${I}x5 s"; exit 0; fi
+            sleep 5
+          done
+          echo "llama-server did not become healthy"; tail -n 50 llama-server.log; exit 1
+
+      - name: Synthesize shard ${{ matrix.shard }}
+        run: |
+          mkdir -p Runs/Sft
+          export SHAHD_TEACHER_MODEL="${GGUF_FILE%.gguf}" # recorded in every record's provenance + license
+          bun run sft:synthesize --Shard=${{ matrix.shard }}/${{ needs.plan.outputs.total }} --Count=$ITEMS --Budget=$BUDGET \
+            --MaxMinutes=$MINUTES --TeacherTimeoutSec=180 --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.v1.json \
+            --Out=Runs/Sft/shard-${{ matrix.shard }}.jsonl
+
+      - name: Teacher log (on failure)
+        if: failure()
+        run: tail -n 100 llama-server.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: SyntheticSft-shard-${{ matrix.shard }}
+          path: |
+            Runs/Sft/shard-${{ matrix.shard }}.jsonl
+            Runs/Sft/shard-${{ matrix.shard }}.stats.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  merge:
+    name: merge → SyntheticSft
+    needs: synthesize
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: SyntheticSft-shard-*
+          path: Runs/Sft/shards
+
+      - name: Concatenate, dedup and summarize
+        run: |
+          bun run sft:merge --In=Runs/Sft/shards --Out=Runs/Sft/Merged
+          test -s Runs/Sft/Merged/SyntheticSft.jsonl || { echo "no conversations were accepted"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SyntheticSft
+          path: Runs/Sft/Merged/
+          retention-days: 30
+          if-no-files-found: error

@@ -3,11 +3,14 @@
 // a working C toolchain (gcc); build via PowerShell where MinGW gcc works cleanly (Git Bash
 // shadows the toolchain and breaks cgo).
 //
-//   Build:  go build -buildmode=c-shared -o ../matmul.dll ./   (run from GoKernels/ffi)
+//   Build:  go build -buildmode=c-shared -o ../matmul.dll ./   (run from GoKernels/ffi, any OS)
+//   (the .dll name is kept on Linux/macOS too — dlopen does not care about the extension, and
+//   GoFfiBackend's default path expects exactly GoKernels/matmul.dll)
 //
-// This file is the THREADING + FFI shell only; the arithmetic lives in matmul_avx.c (AVX2+FMA). The
-// split is forced by cgo: a file using //export may only DECLARE C functions in its preamble, never
-// define them.
+// This file is the THREADING + FFI shell only; the arithmetic lives in matmul_avx.c (AVX2+FMA) and
+// its portable twin matmul_scalar.c, selected per call by matmul_dispatch.c from a CPUID check made
+// at load time — so the library is safe on CPUs without AVX2/FMA (no SIGILL). The split is forced by
+// cgo: a file using //export may only DECLARE C functions in its preamble, never define them.
 //
 // Why the inner loop is C, not Go: Go has no SIMD intrinsics, so a Go kernel stays scalar (it would
 // need Plan9 assembly). Measured, the old scalar Go kernel ran ~16 GFLOP/s on a CPU capable of ~500,
@@ -30,10 +33,14 @@ package main
 
 /*
 #cgo CFLAGS: -O3
-void MatMulRowsAvx(const double *A, const double *BT, double *O, int RowStart, int RowEnd, int K, int N, int Acc);
-void MatMulTnAvx(const double *A, const double *DOut, double *DB, int PStart, int PEnd, int M, int K, int N, int Acc);
-void MatMulRowsAvxF32(const float *A, const float *BT, float *O, int RowStart, int RowEnd, int K, int N, int Acc);
-void MatMulTnAvxF32(const float *A, const float *DOut, float *DB, int PStart, int PEnd, int M, int K, int N, int Acc);
+// Dispatchers (matmul_dispatch.c): AVX2+FMA when the CPU has it, the scalar copy otherwise.
+// NEVER declare/call the *Avx kernels here directly — they carry no CPUID check (SIGILL risk).
+void MatMulRowsKernel(const double *A, const double *BT, double *O, int RowStart, int RowEnd, int K, int N, int Acc);
+void MatMulTnKernel(const double *A, const double *DOut, double *DB, int PStart, int PEnd, int M, int K, int N, int Acc);
+void MatMulRowsKernelF32(const float *A, const float *BT, float *O, int RowStart, int RowEnd, int K, int N, int Acc);
+void MatMulTnKernelF32(const float *A, const float *DOut, float *DB, int PStart, int PEnd, int M, int K, int N, int Acc);
+int CpuHasAvx2Fma(void);
+void ForceScalarKernels(int Force);
 */
 import "C"
 import (
@@ -91,6 +98,25 @@ func SetKernelThreads(n C.int) {
 	atomic.StoreInt64(&MaxKernelWorkers, int64(n))
 }
 
+// ShahdCpuSupportsAvx2Fma reports whether the fast AVX2+FMA kernels run on this CPU (1) or the
+// portable scalar fallback does (0). The TS BackendSelector calls it right after dlopen and prefers
+// the TS backend when it is 0; a library WITHOUT this symbol predates the dispatcher and may SIGILL,
+// so the selector treats its absence as unsafe.
+//
+//export ShahdCpuSupportsAvx2Fma
+func ShahdCpuSupportsAvx2Fma() C.int {
+	return C.CpuHasAvx2Fma()
+}
+
+// SetScalarKernels forces the scalar kernels (n != 0) or restores CPU-based dispatch (n == 0).
+// Test hook: lets the scalar fallback be parity-checked on an AVX2 machine. Never enables AVX on a
+// CPU without it.
+//
+//export SetScalarKernels
+func SetScalarKernels(n C.int) {
+	C.ForceScalarKernels(n)
+}
+
 func KernelWorkerCap() int {
 	V := atomic.LoadInt64(&MaxKernelWorkers)
 	if V <= 0 {
@@ -117,7 +143,7 @@ func FanOutRows(a, bt, out *C.double, M, K, N, Acc int) {
 	// Single range: run on the calling thread. Under the worker pool this is EVERY call (cap = 1),
 	// so the spawn/join would otherwise be paid thousands of times per step for zero parallelism.
 	if RowsPer >= M {
-		C.MatMulRowsAvx(a, bt, out, C.int(0), C.int(M), C.int(K), C.int(N), C.int(Acc))
+		C.MatMulRowsKernel(a, bt, out, C.int(0), C.int(M), C.int(K), C.int(N), C.int(Acc))
 		return
 	}
 
@@ -130,7 +156,7 @@ func FanOutRows(a, bt, out *C.double, M, K, N, Acc int) {
 		Wg.Add(1)
 		go func(RowStart, RowEnd int) {
 			defer Wg.Done()
-			C.MatMulRowsAvx(a, bt, out, C.int(RowStart), C.int(RowEnd), C.int(K), C.int(N), C.int(Acc))
+			C.MatMulRowsKernel(a, bt, out, C.int(RowStart), C.int(RowEnd), C.int(K), C.int(N), C.int(Acc))
 		}(Start, End)
 	}
 	Wg.Wait()
@@ -241,7 +267,7 @@ func MatMulTNF64(a *C.double, dout *C.double, db *C.double, m C.int, k C.int, n 
 		Workers = 1
 	}
 	if Workers == 1 { // same single-range rule as FanOutRows
-		C.MatMulTnAvx(a, dout, db, C.int(0), C.int(K), C.int(M), C.int(K), C.int(N), C.int(acc))
+		C.MatMulTnKernel(a, dout, db, C.int(0), C.int(K), C.int(M), C.int(K), C.int(N), C.int(acc))
 		return
 	}
 	PPer := (K + Workers - 1) / Workers
@@ -256,7 +282,7 @@ func MatMulTNF64(a *C.double, dout *C.double, db *C.double, m C.int, k C.int, n 
 		Wg.Add(1)
 		go func(PStart, PEnd int) {
 			defer Wg.Done()
-			C.MatMulTnAvx(a, dout, db, C.int(PStart), C.int(PEnd), C.int(M), C.int(K), C.int(N), C.int(acc))
+			C.MatMulTnKernel(a, dout, db, C.int(PStart), C.int(PEnd), C.int(M), C.int(K), C.int(N), C.int(acc))
 		}(P0, P1)
 	}
 	Wg.Wait()
@@ -279,7 +305,7 @@ func FanOutRowsF32(a, bt, out *C.float, M, K, N, Acc int) {
 	RowsPer = ((RowsPer + RowBlock - 1) / RowBlock) * RowBlock
 
 	if RowsPer >= M { // single range: run on the calling thread (the worker-pool fast path)
-		C.MatMulRowsAvxF32(a, bt, out, C.int(0), C.int(M), C.int(K), C.int(N), C.int(Acc))
+		C.MatMulRowsKernelF32(a, bt, out, C.int(0), C.int(M), C.int(K), C.int(N), C.int(Acc))
 		return
 	}
 
@@ -292,7 +318,7 @@ func FanOutRowsF32(a, bt, out *C.float, M, K, N, Acc int) {
 		Wg.Add(1)
 		go func(RowStart, RowEnd int) {
 			defer Wg.Done()
-			C.MatMulRowsAvxF32(a, bt, out, C.int(RowStart), C.int(RowEnd), C.int(K), C.int(N), C.int(Acc))
+			C.MatMulRowsKernelF32(a, bt, out, C.int(RowStart), C.int(RowEnd), C.int(K), C.int(N), C.int(Acc))
 		}(Start, End)
 	}
 	Wg.Wait()
@@ -347,7 +373,7 @@ func MatMulTNF32(a *C.float, dout *C.float, db *C.float, m C.int, k C.int, n C.i
 		Workers = 1
 	}
 	if Workers == 1 { // same single-range rule as FanOutRows
-		C.MatMulTnAvxF32(a, dout, db, C.int(0), C.int(K), C.int(M), C.int(K), C.int(N), C.int(acc))
+		C.MatMulTnKernelF32(a, dout, db, C.int(0), C.int(K), C.int(M), C.int(K), C.int(N), C.int(acc))
 		return
 	}
 	PPer := (K + Workers - 1) / Workers
@@ -362,7 +388,7 @@ func MatMulTNF32(a *C.float, dout *C.float, db *C.float, m C.int, k C.int, n C.i
 		Wg.Add(1)
 		go func(PStart, PEnd int) {
 			defer Wg.Done()
-			C.MatMulTnAvxF32(a, dout, db, C.int(PStart), C.int(PEnd), C.int(M), C.int(K), C.int(N), C.int(acc))
+			C.MatMulTnKernelF32(a, dout, db, C.int(PStart), C.int(PEnd), C.int(M), C.int(K), C.int(N), C.int(acc))
 		}(P0, P1)
 	}
 	Wg.Wait()

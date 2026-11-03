@@ -170,10 +170,14 @@ test("GoFfi Into/NtAcc/TnAcc kernels match the TS reference and honor accumulate
     for (let I = 0; I < Size; I++) Buf[I] = Rng.NextGaussian();
     return Buf;
   };
+  // Error relative to max(|Want|, 1): the accumulate variants ADD a random seed to the product, so
+  // an element can cancel to ~1e-4 while carrying the full ~1e-14 absolute rounding noise of a
+  // 256-term sum — a pure-relative metric then reports ~1e-10 for a correct kernel (observed). A
+  // real kernel bug (wrong index, missed tail, overwrite-vs-accumulate) is an O(1) error either way.
   const ExpectClose = (Got: Float64Array, Want: Float64Array): void => {
     let MaxRel = 0;
     for (let I = 0; I < Want.length; I++) {
-      MaxRel = Math.max(MaxRel, Math.abs(Want[I] - Got[I]) / (Math.abs(Want[I]) + 1e-9));
+      MaxRel = Math.max(MaxRel, Math.abs(Want[I] - Got[I]) / Math.max(Math.abs(Want[I]), 1));
     }
     expect(MaxRel).toBeLessThan(1e-10);
   };
@@ -266,4 +270,44 @@ test("switching away from the Go FFI backend leaves an already-captured backend 
 
   const Out = Captured.MatMul(new Float64Array([1, 2, 3, 4]), new Float64Array([1, 0, 0, 1]), 2, 2, 2);
   expect(Array.from(Out)).toEqual([1, 2, 3, 4]); // identity multiply still correct after the switch
+});
+
+test("MatMulNtInto (Out = A @ Btᵀ, overwrite) agrees across TsBackend, TsBackendF32 and GoFfi", () => {
+  // The NT forward entry used by attention scores / tied heads: Bt arrives stored [N,K], and Out is
+  // fully OVERWRITTEN (dirty buffers prove no accumulation leaks in). Reference = MatMul(A, Btᵀ).
+  const Rng = new SeededRng(31);
+  const Shapes: [number, number, number][] = [[33, 70, 19], [7, 5, 3], [1, 1, 1]];
+  const Ts = new TsBackend();
+  const Ffi = ActivateFromConfig(LoadConfig({ Overrides: { Compute: { Backend: "GoFfi", Precision: "F64" } }, UseCli: false, UseEnv: false }));
+  const Native = Ffi.FellBack ? null : GetActiveBackend();
+  SetActiveBackend(null);
+  for (const [M, K, N] of Shapes) {
+    const A = new Float64Array(M * K);
+    const Bt = new Float64Array(N * K);
+    for (let I = 0; I < A.length; I++) A[I] = Rng.NextGaussian();
+    for (let I = 0; I < Bt.length; I++) Bt[I] = Rng.NextGaussian();
+    const B = new Float64Array(K * N);
+    for (let R = 0; R < N; R++) for (let C = 0; C < K; C++) B[C * N + R] = Bt[R * K + C];
+    const Want = Ts.MatMul(A, B, M, K, N);
+
+    const ScaledErr = (Got: ArrayLike<number>): number => {
+      let Max = 0;
+      for (let I = 0; I < Want.length; I++) Max = Math.max(Max, Math.abs(Want[I] - Got[I]) / Math.max(Math.abs(Want[I]), 1));
+      return Max;
+    };
+    const TsOut = new Float64Array(M * N).fill(7);
+    Ts.MatMulNtInto(A, Bt, TsOut, M, K, N);
+    expect(ScaledErr(TsOut)).toBeLessThan(1e-12);
+
+    const F32Out = new Float64Array(M * N).fill(7);
+    new TsBackendF32().MatMulNtInto(A, Bt, F32Out, M, K, N);
+    expect(ScaledErr(F32Out)).toBeLessThan(1e-4);
+
+    if (Native !== null) {
+      if (Native.MatMulNtInto === undefined) throw new Error("GoKernels/matmul.dll is stale: rebuild it");
+      const GoOut = new Float64Array(M * N).fill(7);
+      Native.MatMulNtInto(A, Bt, GoOut, M, K, N);
+      expect(ScaledErr(GoOut)).toBeLessThan(1e-10);
+    }
+  }
 });

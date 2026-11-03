@@ -7,7 +7,7 @@
     "VocabSize": 8192,
     "MlpRatio": 4,
     "LayerNormEps": 1e-5,
-    "Dropout": 0.1,
+    "Dropout": 0,
     "WeightTying": true,
     "InitScale": 0.02,
     "UseScaledResidualInit": true,

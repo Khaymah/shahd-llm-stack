@@ -57,6 +57,27 @@ checksummed), so a downloaded model can be run — `LoadRunnableModel(path)` fro
 The full acceptance conversation (greeting → calculator tool call → identity, one conversation,
 per-reply persisted reasoning): [Docs/screenshots/shahd-chat-full-conversation.png](Docs/screenshots/shahd-chat-full-conversation.png).
 
+## Train a model automatically (GitHub Actions)
+
+The **Train model** workflow (`.github/workflows/train-model.yml`) runs the whole pipeline on a GitHub
+runner — collect the CI corpus from `Data/Spec.ci.json` (explicit permissive repos, `GITHUB_TOKEN`),
+train the tokenizer, pretrain under the epoch cap, SFT, evaluate — and publishes the checkpoints,
+tokenizer, eval reports and a model card as a workflow artifact. Sizes come from a profile in
+`Data/TrainProfiles/`: `ci` (~2M params, ~8 MB, ~35 min) and `micro` (~6.6M params, ~32 MB, ~4.5 h,
+pretrain time-capped so the job always finishes). Start it from **Actions → Train model → Run
+workflow** (pick a profile, optionally override epochs/embed/layers/SFT steps/name), push a
+`model/<profile>-<anything>` branch, or push a `model-<profile>-v<version>` tag (`model-v*` = `ci`)
+to also publish a GitHub Release. Then:
+
+```bash
+bun run serve --Checkpoint=Checkpoints/CiChat.ckpt      # OpenAI-compatible API on 127.0.0.1:8080
+bun run eval  --Checkpoint=Checkpoints/CiChat.ckpt      # the frozen evaluation suite
+```
+
+Locally the same recipe is `bun run foundry:ingest-spec` → `bun run train:bpe` →
+`bun run Scripts/TrainOnFoundry.ts --Spec=Data/Spec.json --Epochs=2 …` → `Scripts/TrainSftChat.ts --From=…`
+(see [Docs/MODEL-SCALING.md](Docs/MODEL-SCALING.md), "Recipe v2").
+
 ## Architecture (layered, `Brain/`)
 
 | Layer                     | What it does                                                                                              |
@@ -73,7 +94,7 @@ per-reply persisted reasoning): [Docs/screenshots/shahd-chat-full-conversation.p
 | `Checkpoint/`           | Self-describing checkpoints (weights + optimizer + RNG + config + hash)                                   |
 | `Safety/`               | Controllable content-safety filter + resource limits +`GuardedGenerate` (absolute priority)             |
 | `Sft/`                  | Chat template + loss masking, task taxonomy, tool-use exemplars                                           |
-| `Eval/` `Rl/`         | pass@k, sandboxed code executor, RLVR rejection sampling                                                  |
+| `Eval/` `Rl/`         | pass@k, resource-capped code runner (not a sandbox), RLVR rejection sampling                                                  |
 | `Serving/`              | Tool protocol,**rich tool system** (`Tools/`), agent loop, OpenAI-compatible server               |
 | `Reasoning/`            | Speculative decoding, self-consistency, tree-of-thoughts, thinking-mode                                   |
 | `ComputeBackend/`       | Pluggable numeric backend seam: TS, Go subprocess, Go FFI (in-process, 2–8× on CPU)                     |

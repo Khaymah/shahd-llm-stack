@@ -17,14 +17,27 @@ export function TableForKind(Kind: DataKind): string {
   return `documents_${Kind}`;
 }
 
-/** Which kind a collection provider produces. New providers slot in here (single source of truth). */
-export function KindForProvider(ProviderName: string): DataKind {
+/** The kind a "folder" collect lands in when the user picked none (books/articles are the common case). */
+export const DefaultFolderKind: DataKind = "books";
+
+/**
+ * Which kind table a collect source / provider writes to — the single source of truth for routing.
+ * Accepts BOTH the dashboard's source ids (LearnSettings.Source: "github" | "local" | "both" | "oasst" |
+ * "oasst2" | "wikipedia" | "wikidump" | "gsm8k" | "folder" | "stackexchange") and the providers' own
+ * Name values ("github-repo", "local-repo", "local-folder", "web-search", …):
+ *   oasst / oasst2 / stackexchange      -> conversation
+ *   wikipedia / wikidump                -> knowledge
+ *   gsm8k                               -> instruction
+ *   folder / local-folder               -> FolderKind (the user's choice), else books
+ *   web-search                          -> web (Raw-only general web)
+ *   github / github-repo / local / local-repo / both / anything else -> code
+ * The trailing default matches the dashboard's historical routing, where every non-dataset source is a
+ * code source.
+ */
+export function KindForProvider(ProviderName: string, FolderKind?: DataKind): DataKind {
   switch (ProviderName) {
-    case "github-repo":
-    case "github":
-    case "local-repo":
-      return "code";
     case "oasst":
+    case "oasst2":
     case "stackexchange":
       return "conversation";
     case "wikipedia":
@@ -32,10 +45,11 @@ export function KindForProvider(ProviderName: string): DataKind {
       return "knowledge";
     case "gsm8k":
       return "instruction";
+    case "folder":
+    case "local-folder":
+      return FolderKind ?? DefaultFolderKind;
     case "web-search":
       return "web";
-    case "local-folder":
-      return "books"; // default; the dashboard lets the user override the kind per folder
     default:
       return "code";
   }

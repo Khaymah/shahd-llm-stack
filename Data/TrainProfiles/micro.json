@@ -1,0 +1,13 @@
+{
+  "Note": "~6.6M params on ~32 MB, 2 epochs. Measured 2.45 s/step on 4 local cores (about 3.3 s on a GitHub runner): ~3,700 steps in ~3.4 h; the pretrain cap stops it gracefully before the 6 h job limit.",
+  "Spec": "Data/Spec.micro.json",
+  "Tokenizer": "micro",
+  "Embed": 256,
+  "Layers": 6,
+  "Heads": 4,
+  "Batch": 16,
+  "Epochs": 2,
+  "PretrainMinutes": 250,
+  "SftSteps": 600,
+  "Name": "MicroChat2"
+}

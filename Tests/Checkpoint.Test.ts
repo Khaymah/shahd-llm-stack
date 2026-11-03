@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, spyOn } from "bun:test";
 import { rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { LoadConfig } from "../Brain/Config/LoadConfig.ts";
 import { CreateRngStreams } from "../Brain/Random/SeededRng.ts";
@@ -6,7 +6,9 @@ import { Shahd } from "../Brain/Nn/Shahd.ts";
 import { CreateOptimizer } from "../Brain/Optim/OptimBarrel.ts";
 import { CrossEntropy } from "../Brain/Ops/OpsBarrel.ts";
 import { Backward } from "../Brain/Autograd/Backward.ts";
-import { SaveCheckpoint } from "../Brain/Checkpoint/CheckpointWriter.ts";
+import { SaveCheckpoint, BuildCheckpoint } from "../Brain/Checkpoint/CheckpointWriter.ts";
+import { LoadRunnableModelFrom } from "../Brain/Checkpoint/LoadRunnableModel.ts";
+import { DefaultConfig } from "../Brain/Config/Constants.ts";
 import { LoadCheckpoint, ApplyCheckpoint, ApplyCheckpointWeights } from "../Brain/Checkpoint/CheckpointReader.ts";
 import type { ConfigOverride } from "../Brain/Config/ConfigTypes.ts";
 
@@ -105,4 +107,49 @@ test("checkpoint write is atomic (rotates a .bak) and load rejects a corrupted p
 
   rmSync(CkptPath, { force: true });
   rmSync(`${CkptPath}.bak`, { force: true });
+});
+
+test("a checkpoint cannot carry policy: Tools/Safety/Limits/Compute come from local defaults", () => {
+  // A (possibly shared/downloaded) checkpoint that tries to grant itself code execution + no safety.
+  const Hostile = Build({ ...BaseOverride, Tools: { ExecEnabled: true, WebSearchEnabled: true }, Safety: { Enabled: false }, Limits: { MaxNewTokens: 999999 } });
+  const Ckpt = BuildCheckpoint(Hostile.Model, Hostile.Opt, Hostile.Rng, {}, { Kind: "Char", Chars: "abcdefghij".split("") });
+  expect(Ckpt.Config.Tools.ExecEnabled).toBe(true); // the payload really carries the hostile policy
+
+  const Warn = spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    const Loaded = LoadRunnableModelFrom(Ckpt);
+    expect(Loaded.Config.Tools.ExecEnabled).toBe(DefaultConfig.Tools.ExecEnabled);
+    expect(Loaded.Config.Tools.WebSearchEnabled).toBe(DefaultConfig.Tools.WebSearchEnabled);
+    expect(Loaded.Config.Safety.Enabled).toBe(true);
+    expect(Loaded.Config.Limits.MaxNewTokens).toBe(DefaultConfig.Limits.MaxNewTokens);
+    // Exactly one warning, naming what was ignored — and no spurious config-hash drift warning.
+    expect(Warn).toHaveBeenCalledTimes(1);
+    expect(String(Warn.mock.calls[0]?.[0])).toContain("Tools.ExecEnabled=true");
+    // Non-policy sections still come from the checkpoint: the weights load bit-identically.
+    expect(Loaded.Config.Model.EmbedDim).toBe(8);
+    const PA = Hostile.Model.Parameters();
+    const PB = Loaded.Model.Parameters();
+    for (let I = 0; I < PA.length; I++) expect(Array.from(PB[I].Data)).toEqual(Array.from(PA[I].Data));
+
+    // Operator policy applies on top of the defaults — but cannot reshape the model through this path.
+    const Operator = LoadRunnableModelFrom(Ckpt, { Tools: { WebSearchEnabled: true }, Model: { EmbedDim: 16 } });
+    expect(Operator.Config.Tools.WebSearchEnabled).toBe(true);
+    expect(Operator.Config.Tools.ExecEnabled).toBe(DefaultConfig.Tools.ExecEnabled);
+    expect(Operator.Config.Model.EmbedDim).toBe(8);
+  } finally {
+    Warn.mockRestore();
+  }
+});
+
+test("a checkpoint with default policy loads silently", () => {
+  const A = Build(BaseOverride);
+  const Ckpt = BuildCheckpoint(A.Model, A.Opt, A.Rng, {}, { Kind: "Char", Chars: "abcdefghij".split("") });
+  const Warn = spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    const Loaded = LoadRunnableModelFrom(Ckpt);
+    expect(Loaded.Config.ConfigHash).toBe(Ckpt.ConfigHash);
+    expect(Warn).not.toHaveBeenCalled();
+  } finally {
+    Warn.mockRestore();
+  }
 });

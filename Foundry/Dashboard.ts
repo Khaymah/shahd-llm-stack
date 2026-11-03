@@ -10,9 +10,11 @@
 // The WebSocket pushes system/stats snapshots on a ticker, streams Learn progress (incl. per-repo
 // file progress), and streams chat token-by-token. Learn runner + chat service + model info are
 // INJECTED so the handler is testable and never imports the network/model layers itself.
+// Local-only by design (no login): it binds to loopback and every /api/* request and /ws upgrade must
+// carry a loopback Origin/Host (DashboardGuard) — the boundary against cross-site pages + DNS rebinding.
 
 import type { Server, ServerWebSocket } from "bun";
-import type { DocumentStore, DocumentFilter, DocumentPage, FoundryStats } from "./DocumentStore.ts";
+import type { DocumentStore, DocumentFilter, SummaryPage, FoundryStats } from "./DocumentStore.ts";
 import type { DocumentRecord } from "./DocumentRecord.ts";
 import type { DataKind } from "./DataKinds.ts";
 import { IsDataKind } from "./DataKinds.ts";
@@ -24,8 +26,10 @@ import type { ChatService } from "./ChatService.ts";
 import type { ModelInfo } from "./ModelInfo.ts";
 import type { CheckpointSummary } from "./PostgresCheckpointStore.ts";
 import { DashboardHtml } from "./DashboardHtml.ts";
-import { ChatHtml } from "./ChatHtml.ts";
+import { RenderChatHtml } from "./ChatHtml.ts";
 import { GetSystemInfo } from "./SystemInfo.ts";
+import { DefaultConfig } from "../Brain/Config/Constants.ts";
+import { IsLocalOrigin, IsLocalHost, IsJsonContentType, IsValidConvId, ResolveBindHost, BindHostAliases, BindEnvVar, DefaultDashboardPort, NewCspNonce, DashboardPageCsp, ChatPageCsp } from "./DashboardGuard.ts";
 
 export type DashboardHandler = (Req: Request) => Promise<Response>;
 export type DashboardOptions = {
@@ -40,13 +44,29 @@ export type DashboardOptions = {
   Collection?: () => Promise<CollectionState[]>; // the collection ledger: lifetime/exhausted/cursor per source
   // Data browser (per-kind, paginated) — kind-aware so it reaches every documents_<kind> table, not
   // just the one InspectStore the panel is built with. All injected so Dashboard.ts stays DB-agnostic.
-  Browse?: (Kind: DataKind, Filter: DocumentFilter, Offset: number, Limit: number) => Promise<DocumentPage>;
+  Browse?: (Kind: DataKind, Filter: DocumentFilter, Offset: number, Limit: number) => Promise<SummaryPage>;
   Facets?: (Kind: DataKind) => Promise<FoundryStats>; // distinct tier/lang/license values for the filter dropdowns
   DocContent?: (Kind: DataKind, Id: string) => Promise<DocumentRecord | null>; // one doc's full content (viewer)
   DeleteDoc?: (Kind: DataKind, Id: string) => Promise<number>; // remove one document
   DeleteMatching?: (Kind: DataKind, Filter: DocumentFilter) => Promise<number>; // bulk corpus cleanup
   DeleteCheckpoint?: (Name: string) => Promise<void>; // remove a saved model
+  // Server-side cap on tokens per chat generation (the client's maxTokens is clamped to it). Defaults
+  // to Config.Limits.MaxNewTokens from Constants so the operator's limit is never exceeded over /ws.
+  MaxNewTokens?: number;
 };
+
+const ReplayBufferCap = 500; // replayed Learn/Train events kept per run (first start event + the newest)
+const MaxGlobalGenerations = 2; // chat generations in flight across ALL sockets (CPU-bound model)
+const DefaultChatMaxTokens = 160; // per-turn token budget when the client sends none
+const DefaultChatTemperature = 0.8;
+const SnapshotIntervalMs = 3000; // system/stats push cadence
+
+// Append to a run's replay buffer without unbounded growth: once over the cap, drop the OLDEST events
+// after index 0 — index 0 is always the run's start event, which a late joiner needs to render the run.
+function PushBounded<T>(Events: T[], Event: T): void {
+  Events.push(Event);
+  if (Events.length > ReplayBufferCap) Events.splice(1, Events.length - ReplayBufferCap);
+}
 
 // Build a document filter from a flat record (query params or a POST body use the same lowercase keys).
 function ParseFilter(O: Record<string, unknown>): DocumentFilter {
@@ -92,10 +112,12 @@ function ParseTrainSettings(Body: Record<string, unknown>): TrainSettings {
     MultiTurn: ToNum(Body["MultiTurn"], 3000), // must pass the sanitizer or the CLI silently gets the default (the Workers lesson)
   };
 }
-type WsData = Record<string, never>;
+type WsData = { Generating: boolean }; // per-connection: a chat reply is in flight on this socket
 type Ws = ServerWebSocket<WsData>;
+type ChatMsg = { convId?: unknown; message?: unknown; temperature?: unknown; maxTokens?: unknown };
 
-type JobState = { Running: boolean; Events: LearnEvent[]; Listeners: Set<(Event: LearnEvent) => void>; Controller: AbortController | null };
+// RunId distinguishes runs so a previous run's late settlement can never close the current one.
+type JobState = { Running: boolean; RunId: number; Events: LearnEvent[]; Listeners: Set<(Event: LearnEvent) => void>; Controller: AbortController | null };
 
 function ToNum(Value: unknown, Default: number): number {
   if (Value === null || Value === undefined || Value === "") return Default; // Number(null) is 0, not the default
@@ -134,10 +156,21 @@ function Json(Data: unknown, Status = 200): Response {
   return Response.json(Data, { status: Status });
 }
 
+function HtmlResponse(Html: string, Csp: string): Response {
+  return new Response(Html, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": Csp, "X-Content-Type-Options": "nosniff" } });
+}
+
 // Everything the panel needs, built once and shared by the HTTP handler and the WebSocket handler.
 export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Options: DashboardOptions = {}) {
-  const Job: JobState = { Running: false, Events: [], Listeners: new Set(), Controller: null };
+  const Job: JobState = { Running: false, RunId: 0, Events: [], Listeners: new Set(), Controller: null };
   let Bound: Server<WsData> | null = null;
+  // Guard parameters: the real port + any concrete bind address arrive with AttachServer.
+  let GuardPort = DefaultDashboardPort;
+  let GuardHosts: string[] = [];
+  let Clients = 0; // open WebSockets — background snapshots only run while someone is watching
+  let ActiveGenerations = 0;
+  const MaxNewTokens = Options.MaxNewTokens ?? DefaultConfig.Limits.MaxNewTokens;
+  const IsLocalRequest = (Req: Request): boolean => IsLocalOrigin(Req.headers.get("origin"), GuardPort, GuardHosts) && IsLocalHost(Req.headers.get("host"), GuardPort, GuardHosts);
   const Publish = (Message: unknown): void => {
     Bound?.publish("all", JSON.stringify(Message));
   };
@@ -146,10 +179,12 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
   const Emit = (Event: LearnEvent): void => {
     // repo-progress and scanning are transient status — broadcast live but do NOT buffer in the replay
     // array (re-sent to every new/reconnecting client), so memory stays O(repos).
-    if (Event.kind !== "repo-progress" && Event.kind !== "scanning") Job.Events.push(Event);
+    if (Event.kind !== "repo-progress" && Event.kind !== "scanning") PushBounded(Job.Events, Event);
     for (const Listener of Job.Listeners) Listener(Event);
     Publish({ type: "learn", event: Event });
-    if (Event.kind === "done" || Event.kind === "error") Job.Running = false;
+    // ONLY done is terminal: the runner reports non-fatal errors (one provider failed) mid-run and keeps
+    // going, so flipping Running on error let a second run start on top of a live one.
+    if (Event.kind === "done") Job.Running = false;
   };
 
   const StartLearn = (Settings: LearnSettings): boolean => {
@@ -157,8 +192,15 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
     Job.Running = true;
     Job.Events = [];
     Job.Controller = new AbortController();
+    const RunId = ++Job.RunId;
     Emit({ kind: "start", query: Settings.Query, source: Settings.Source, repos: Settings.MaxRepos });
-    void Learn(Settings, Emit, Job.Controller.signal).catch((Caught) => Emit({ kind: "error", message: (Caught as Error).message }));
+    void Learn(Settings, Emit, Job.Controller.signal)
+      .catch((Caught) => Emit({ kind: "error", message: (Caught as Error).message }))
+      .finally(() => {
+        // Contract: the runner always ends with done (even after errors). If it settled without one
+        // (it threw), close the run here so the panel can never stick in "running".
+        if (Job.RunId === RunId && Job.Running) Emit({ kind: "done", ingested: 0, failed: true, message: "learn runner ended without a done event" });
+      });
     return true;
   };
   const StopLearn = (): void => Job.Controller?.abort();
@@ -167,9 +209,8 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
   // trained checkpoint is reloaded into the live chat model, and the new model panel is broadcast.
   const TrainJob: { Running: boolean; Events: TrainEvent[]; Controller: AbortController | null; Name: string } = { Running: false, Events: [], Controller: null, Name: "foundry" };
   const TrainEmit = (Event: TrainEvent): void => {
-    TrainJob.Events.push(Event); // sparse (one per eval interval) — buffer so reconnects see progress
+    PushBounded(TrainJob.Events, Event); // buffered (bounded) so reconnects see progress
     Publish({ type: "train", event: Event });
-    console.log("TrainEmit", Event);
     if (Event.kind === "train-done" || Event.kind === "train-error") {
       TrainJob.Running = false;
       // A graceful pause saved a checkpoint at the exact stop step — hot-reload it like a finished
@@ -206,8 +247,17 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
     const Url = new URL(Req.url);
     const Path = Url.pathname;
 
-    if (Path === "/" || Path === "/index.html") return new Response(DashboardHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-    if (Path === "/chat" || Path === "/chat.html") return new Response(ChatHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    if (Path === "/" || Path === "/index.html") return HtmlResponse(DashboardHtml, DashboardPageCsp());
+    if (Path === "/chat" || Path === "/chat.html") {
+      const Nonce = NewCspNonce();
+      return HtmlResponse(RenderChatHtml(Nonce), ChatPageCsp(Nonce, Req.headers.get("host"), GuardPort, GuardHosts));
+    }
+
+    if (Path.startsWith("/api/")) {
+      if (!IsLocalRequest(Req)) return Json({ error: "forbidden: the dashboard only answers local origins" }, 403);
+      // JSON-only bodies: a cross-site <form> cannot send application/json without a CORS preflight.
+      if (Req.method === "POST" && !IsJsonContentType(Req.headers.get("content-type"))) return Json({ error: "Content-Type must be application/json" }, 415);
+    }
 
     if (Path === "/api/stats") return Json(await Store.Stats());
     if (Path === "/api/repos") return Json(await Store.RepoSummaries());
@@ -270,7 +320,10 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
       const Body = (await Req.json().catch(() => ({}))) as Record<string, unknown>;
       const Kind = String(Body["kind"] ?? "");
       if (!IsDataKind(Kind)) return Json({ error: "kind required" }, 400);
-      const Deleted = await Options.DeleteMatching(Kind, ParseFilter(Body));
+      const Filter = ParseFilter(Body);
+      // An empty filter wipes the WHOLE kind table — demand an explicit confirm for that case.
+      if (Object.keys(Filter).length === 0 && Body["confirm"] !== true) return Json({ error: "empty filter deletes every document of this kind — send confirm: true" }, 400);
+      const Deleted = await Options.DeleteMatching(Kind, Filter);
       return Json({ deleted: Deleted });
     }
     if (Path === "/api/checkpoint/delete" && Req.method === "POST") {
@@ -283,10 +336,15 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
     }
 
     if (Path === "/api/chat/conversations") return Json(Options.Chat !== undefined ? await Options.Chat.ListConversations() : []);
-    if (Path === "/api/chat/conversation") return Json(Options.Chat !== undefined ? await Options.Chat.Messages(Url.searchParams.get("id") ?? "") : []);
+    if (Path === "/api/chat/conversation") {
+      const Id = Url.searchParams.get("id");
+      if (!IsValidConvId(Id)) return Json({ error: "invalid conversation id" }, 400);
+      return Json(Options.Chat !== undefined ? await Options.Chat.Messages(Id) : []);
+    }
     if (Path === "/api/chat/delete" && Req.method === "POST") {
-      const Body = (await Req.json().catch(() => ({}))) as { id?: string };
-      if (Options.Chat !== undefined && typeof Body.id === "string") await Options.Chat.Delete(Body.id);
+      const Body = (await Req.json().catch(() => ({}))) as { id?: unknown };
+      if (!IsValidConvId(Body.id)) return Json({ error: "invalid conversation id" }, 400);
+      if (Options.Chat !== undefined) await Options.Chat.Delete(Body.id);
       return Json({ ok: true });
     }
 
@@ -334,7 +392,7 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
           }
           Listener = (Event: LearnEvent): void => {
             Send(Event);
-            if (Event.kind === "done" || Event.kind === "error") End();
+            if (Event.kind === "done") End(); // only done is terminal (errors are non-fatal mid-run)
           };
           Job.Listeners.add(Listener);
         },
@@ -360,22 +418,37 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
     for (const Event of TrainJob.Events) Socket.send(JSON.stringify({ type: "train", event: Event }));
   };
 
-  const HandleChat = async (Socket: Ws, Msg: { convId?: string; message?: string; temperature?: number; maxTokens?: number }): Promise<void> => {
+  const HandleChat = async (Socket: Ws, Msg: ChatMsg): Promise<void> => {
     const Chat = Options.Chat;
-    const ConvId = Msg.convId ?? "";
+    if (!IsValidConvId(Msg.convId)) {
+      // Never reflect a malformed id back (it is untrusted input, not a conversation).
+      Socket.send(JSON.stringify({ type: "chat-error", convId: "", error: "invalid conversation id" }));
+      return;
+    }
+    const ConvId = Msg.convId;
     if (Chat === undefined) {
       Socket.send(JSON.stringify({ type: "chat-error", convId: ConvId, error: "no model loaded — train a checkpoint first (see Checkpoints/)" }));
       return;
     }
-    if (typeof Msg.message !== "string" || Msg.message.trim() === "" || ConvId === "") {
+    const Message = Msg.message;
+    if (typeof Message !== "string" || Message.trim() === "") {
       Socket.send(JSON.stringify({ type: "chat-error", convId: ConvId, error: "empty message" }));
       return;
     }
+    // Resource caps: one reply in flight per socket, MaxGlobalGenerations across the server — reject
+    // (with a clear busy error) rather than queue, so a flood can never pile up CPU-bound work.
+    if (Socket.data.Generating || ActiveGenerations >= MaxGlobalGenerations) {
+      const Why = Socket.data.Generating ? "a reply is already generating on this connection" : `the server is already generating ${MaxGlobalGenerations} replies`;
+      Socket.send(JSON.stringify({ type: "chat-error", convId: ConvId, code: "busy", error: `busy — ${Why}; try again when it finishes` }));
+      return;
+    }
+    Socket.data.Generating = true;
+    ActiveGenerations++;
     try {
       // Abort generation if the client goes away (readyState leaves OPEN=1) — don't burn CPU for nobody.
       const Opts = {
-        Temperature: ToNum(Msg.temperature, 0.8),
-        MaxTokens: ToNum(Msg.maxTokens, 160),
+        Temperature: ToNum(Msg.temperature, DefaultChatTemperature),
+        MaxTokens: Math.min(MaxNewTokens, Math.max(1, Math.floor(ToNum(Msg.maxTokens, DefaultChatMaxTokens)))), // server-side cap
         ShouldStop: (): boolean => Socket.readyState !== 1,
         OnTrace: (Lines: unknown): void => {
           Socket.send(JSON.stringify({ type: "chat-trace", convId: ConvId, lines: Lines })); // the visible reasoning steps
@@ -389,17 +462,24 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
           Socket.send(JSON.stringify({ type: "chat-tool", convId: ConvId, line: Line }));
         },
       };
-      await Chat.Turn(ConvId, Msg.message, Opts, (Delta) => Socket.send(JSON.stringify({ type: "chat-delta", convId: ConvId, delta: Delta })));
+      await Chat.Turn(ConvId, Message, Opts, (Delta) => Socket.send(JSON.stringify({ type: "chat-delta", convId: ConvId, delta: Delta })));
       Socket.send(JSON.stringify({ type: "chat-done", convId: ConvId }));
     } catch (Caught) {
       Socket.send(JSON.stringify({ type: "chat-error", convId: ConvId, error: (Caught as Error).message }));
+    } finally {
+      Socket.data.Generating = false;
+      ActiveGenerations--;
     }
   };
 
   const WebSocket = {
     open: (Socket: Ws): void => {
+      Clients++;
       Socket.subscribe("all");
       SendSnapshots(Socket);
+    },
+    close: (): void => {
+      Clients = Math.max(0, Clients - 1);
     },
     message: (Socket: Ws, Raw: string | Buffer): void => {
       let Msg: { type?: string; settings?: Record<string, unknown> } & Record<string, unknown>;
@@ -423,45 +503,54 @@ export function CreateDashboardParts(Store: DocumentStore, Learn?: LearnFn, Opti
       } else if (Msg.type === "load-model") {
         void LoadModelByName(String(Msg["name"] ?? ""), Socket);
       } else if (Msg.type === "chat") {
-        void HandleChat(Socket, Msg as { convId?: string; message?: string; temperature?: number; maxTokens?: number });
+        void HandleChat(Socket, Msg as ChatMsg);
       }
     },
   };
 
   const AttachServer = (S: Server<WsData>): void => {
     Bound = S;
+    GuardPort = S.port ?? GuardPort;
+    GuardHosts = BindHostAliases(S.hostname ?? "");
+  };
+  // The server's fetch: guard + upgrade /ws (a cross-site page must not hijack the socket), else HTTP.
+  const Serve = (Req: Request, Upgrader: Pick<Server<WsData>, "upgrade">): Response | Promise<Response> | undefined => {
+    if (new URL(Req.url).pathname === "/ws") {
+      if (!IsLocalRequest(Req)) return new Response("forbidden: the dashboard only answers local origins", { status: 403 });
+      if (Upgrader.upgrade(Req, { data: { Generating: false } })) return undefined;
+      return new Response("websocket upgrade failed", { status: 400 });
+    }
+    return Fetch(Req);
   };
   const Snapshot = (): void => {
+    if (Clients === 0) return; // nobody watching — skip the stats query entirely
     Publish({ type: "system", data: GetSystemInfo() });
     void Store.Stats()
       .then((S) => Publish({ type: "stats", data: S }))
       .catch(() => undefined); // transient store error must not crash the ticker
   };
 
-  return { Fetch, WebSocket, AttachServer, Snapshot };
+  return { Fetch, Serve, WebSocket, AttachServer, Snapshot };
 }
 
 export function CreateDashboardHandler(Store: DocumentStore, Learn?: LearnFn, Options: DashboardOptions = {}): DashboardHandler {
   return CreateDashboardParts(Store, Learn, Options).Fetch;
 }
 
-export function StartDashboard(Store: DocumentStore, Port = 8090, Learn?: LearnFn, Options: DashboardOptions = {}): Server<WsData> {
+export function StartDashboard(Store: DocumentStore, Port = DefaultDashboardPort, Learn?: LearnFn, Options: DashboardOptions = {}): Server<WsData> {
   const Parts = CreateDashboardParts(Store, Learn, Options);
+  const Hostname = ResolveBindHost(); // loopback unless FOUNDRY_BIND says otherwise
   // idleTimeout 0 disables Bun's 10s request timeout, which would otherwise kill a long-lived SSE
   // stream mid-learn (a whole-repo ingest can take much longer than 10s).
   const Instance = Bun.serve<WsData>({
+    hostname: Hostname,
     port: Port,
     idleTimeout: 0,
-    fetch: (Req: Request, Serv: Server<WsData>): Response | Promise<Response> | undefined => {
-      if (new URL(Req.url).pathname === "/ws") {
-        if (Serv.upgrade(Req, { data: {} })) return undefined;
-        return new Response("websocket upgrade failed", { status: 400 });
-      }
-      return Parts.Fetch(Req);
-    },
+    fetch: (Req: Request, Serv: Server<WsData>): Response | Promise<Response> | undefined => Parts.Serve(Req, Serv),
     websocket: Parts.WebSocket,
   });
   Parts.AttachServer(Instance);
-  setInterval(() => Parts.Snapshot(), 3000); // realtime system + stats push
+  setInterval(() => Parts.Snapshot(), SnapshotIntervalMs); // realtime system + stats push (only while clients are connected)
+  console.log(`[dashboard] listening on ${Instance.url.href} (bind ${Instance.hostname ?? Hostname}; set ${BindEnvVar} to change)`);
   return Instance;
 }

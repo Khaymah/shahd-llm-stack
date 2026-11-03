@@ -5,6 +5,7 @@
 import postgres from "postgres";
 import type { CollectionStateStore, CollectionState } from "./CollectionState.ts";
 import type { DataKind } from "./DataKinds.ts";
+import { CreateMigrationGate } from "./FoundrySchema.ts";
 
 type Row = { source_key: string; kind: string; cursor: string; collected: number; exhausted: boolean; updated_at: string };
 
@@ -15,16 +16,13 @@ function FromRow(R: Row): CollectionState {
 export class PostgresCollectionStateStore implements CollectionStateStore {
   private Sql: ReturnType<typeof postgres>;
   private OwnsSql: boolean;
-  private Ready: Promise<void>;
+  // Lazy, self-healing migration gate (see CreateMigrationGate): retried on the next call if it failed.
+  private Ready: () => Promise<void>;
 
   constructor(UrlOrSql: string | ReturnType<typeof postgres>) {
     this.OwnsSql = typeof UrlOrSql === "string";
     this.Sql = typeof UrlOrSql === "string" ? postgres(UrlOrSql, { onnotice: () => {} }) : UrlOrSql;
-    // Swallow the rejection here so a DB blip at startup can't become an unhandled rejection; the real
-    // failure resurfaces when a method awaits Ready.
-    this.Ready = this.Migrate().catch((Caught) => {
-      console.warn(`PostgresCollectionStateStore: migration deferred: ${(Caught as Error).message}`);
-    });
+    this.Ready = CreateMigrationGate(() => this.Migrate(), "PostgresCollectionStateStore");
   }
 
   private async Migrate(): Promise<void> {
@@ -39,13 +37,13 @@ export class PostgresCollectionStateStore implements CollectionStateStore {
   }
 
   async Get(SourceKey: string): Promise<CollectionState | null> {
-    await this.Ready;
+    await this.Ready();
     const Rows = (await this.Sql`SELECT source_key, kind, cursor, collected, exhausted, updated_at FROM collection_state WHERE source_key = ${SourceKey}`) as unknown as Row[];
     return Rows[0] ? FromRow(Rows[0]) : null;
   }
 
   async Upsert(State: CollectionState): Promise<void> {
-    await this.Ready;
+    await this.Ready();
     await this.Sql`INSERT INTO collection_state (source_key, kind, cursor, collected, exhausted, updated_at)
       VALUES (${State.SourceKey}, ${State.Kind}, ${State.Cursor}, ${State.Collected}, ${State.Exhausted}, ${State.UpdatedAt})
       ON CONFLICT (source_key) DO UPDATE SET
@@ -54,7 +52,7 @@ export class PostgresCollectionStateStore implements CollectionStateStore {
   }
 
   async All(): Promise<CollectionState[]> {
-    await this.Ready;
+    await this.Ready();
     const Rows = (await this.Sql`SELECT source_key, kind, cursor, collected, exhausted, updated_at FROM collection_state ORDER BY updated_at DESC`) as unknown as Row[];
     return Rows.map(FromRow);
   }

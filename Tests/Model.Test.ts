@@ -47,3 +47,28 @@ test("full-model backward is gradcheck-correct (untied weights, single head)", (
   });
   expect(Result.Passed).toBe(true);
 });
+
+test("ForwardLastLogits is bit-identical to the last row of the full forward (tied, untied, modern)", () => {
+  const Variants: ConfigOverride[] = [
+    { Model: { EmbedDim: 8, NumLayers: 2, NumHeads: 2, BlockSize: 8, VocabSize: 10, WeightTying: true } },
+    { Model: { EmbedDim: 6, NumLayers: 1, NumHeads: 1, BlockSize: 8, VocabSize: 7, WeightTying: false } },
+    { Model: { EmbedDim: 8, NumLayers: 2, NumHeads: 4, KvHeads: 2, BlockSize: 8, VocabSize: 10, PositionScheme: "Rope", NormKind: "RmsNorm", MlpKind: "SwiGlu" } },
+  ];
+  for (const Overrides of Variants) {
+    const Model = BuildTiny(Overrides);
+    const V = Model.Config.Model.VocabSize;
+    for (const Ids of [[3], [1, 4, 2, 5, 0, 3, 6, 2]]) {
+      const Full = Model.Forward(Ids);
+      const Last = Model.ForwardLastLogits(Ids);
+      expect(Last.Rows).toBe(1);
+      expect(Last.Cols).toBe(V);
+      expect(Array.from(Last.Data)).toEqual(Array.from(Full.Data.subarray((Ids.length - 1) * V)));
+    }
+  }
+});
+
+test("ForwardLastLogits rejects an empty context and builds no graph", () => {
+  const Model = BuildTiny({ Model: { EmbedDim: 8, NumLayers: 1, NumHeads: 2, BlockSize: 8, VocabSize: 10 } });
+  expect(() => Model.ForwardLastLogits([])).toThrow(/empty/);
+  expect(Model.ForwardLastLogits([1, 2]).Prev.length).toBe(0); // tape was off inside
+});

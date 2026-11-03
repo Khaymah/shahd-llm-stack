@@ -6,18 +6,23 @@
 //
 //   bun run Scripts/TrainOnFoundry.ts --Measure                 # time a few steps, then stop
 //   bun run Scripts/TrainOnFoundry.ts --Steps=2000 --Save=Checkpoints/Foundry.ckpt
+//   bun run Scripts/TrainOnFoundry.ts --Spec=Data/Spec.json --Steps=20000   # recipe v2 (see MODEL-SCALING)
+//
+// Recipe v2 knobs: --Spec samples the mix PER SLICE of the Data Spec (context, epoch cap, WSD schedule
+// default from it); --Tokenizer reuses a persisted tokenizer (default Data/Tokenizer.v1.json when it
+// exists; "fresh" = learn merges from this corpus); --AllowEpochs=<n> overrides the epoch guard.
 
 import { LoadConfig } from "../Brain/Config/LoadConfig.ts";
+import { WsdDecayStart } from "../Brain/Config/ValidateConfig.ts";
 import { CreateRngStreams } from "../Brain/Random/SeededRng.ts";
 import { TrainBpe } from "../Brain/Tokenizer/BpeMergeTrainer.ts";
 import { BytePairEncoder } from "../Brain/Tokenizer/BytePairEncoder.ts";
 import { SpecialTokenizer } from "../Brain/Tokenizer/SpecialTokenizer.ts";
 import { SpecialTokens } from "../Brain/Tokenizer/SpecialTokens.ts";
-import { FimTokens } from "../Brain/Data/FimReformat.ts";
-import { ChatTokenList } from "../Brain/Sft/ChatTemplate.ts";
-import { ToolTokenList } from "../Brain/Serving/ToolProtocol.ts";
-import { SplitAndEncodeDocuments } from "../Brain/Data/TrainValSplit.ts";
 import { DedupedIndices } from "../Brain/Data/NearDedup.ts";
+import { AssignValidationSides } from "../Brain/Data/DocumentSplit.ts";
+import { Decontaminate } from "../Brain/Data/Decontamination.ts";
+import { TrainingDecontaminationDocs } from "../Brain/Eval/Suite/SuiteEvalDocs.ts";
 import { InMemoryDataLoader } from "../Brain/Data/DataLoader.ts";
 import { Shahd } from "../Brain/Nn/Shahd.ts";
 import { CreateOptimizer } from "../Brain/Optim/OptimBarrel.ts";
@@ -31,9 +36,10 @@ import { ApplyCheckpoint } from "../Brain/Checkpoint/CheckpointReader.ts";
 import type { Checkpoint } from "../Brain/Checkpoint/CheckpointFormat.ts";
 import { PostgresCheckpointStore } from "../Foundry/PostgresCheckpointStore.ts";
 import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
-import { ResolveFoundryStores } from "./FoundryEnv.ts";
-import { ReadArg, ReadFlag } from "./ScriptArgs.ts";
-import { existsSync } from "node:fs";
+import { CheckpointFile, ResolveFoundryStores } from "./FoundryEnv.ts";
+import { ReadArg, ReadFlag, ReadFloatArg } from "./ScriptArgs.ts";
+import { AssembleSpecMix, CheckEpochs, ChooseTokenizerFile, DecideResume, DescribeMix, PickMerges, PretrainSources, PretrainSpecials, ResolveSpec, SpecTotalMb, StepsForEpochs, StopFilePredicate } from "./TrainingCorpus.ts";
+import { LoadBpeModel } from "../Brain/Tokenizer/Internal/BpeModelFile.ts";
 
 // Specials reserved above the BPE vocab: EOS + the FIM sentinels + the chat/tool control tokens —
 // all reserved unconditionally so a later run (or resume of one) doesn't shift the vocab / token ids.
@@ -42,32 +48,52 @@ import { existsSync } from "node:fs";
 // (TrainSftChat --From) with an IDENTICAL tokenizer/vocab, and the SFT stage trains them.
 // ⚠ This changes the vocab offset: base checkpoints saved before the reservation no longer resume
 // (the guard below rejects them cleanly — retrain, which the bigger-model plan does anyway).
-const FimSpecials = Object.values(FimTokens);
-const BaseSpecials = [SpecialTokens.Eos, ...FimSpecials, ...ChatTokenList, ...ToolTokenList];
+// The layout itself lives in TrainingCorpus.ts (PretrainSpecials) — shared with TrainBpeMerges, whose
+// default merge count is sized so that 256 + merges + these specials = the spec's VocabSize.
+const BaseSpecials = [...PretrainSpecials];
 const NumSpecials = BaseSpecials.length;
 
-const CorpusMb = Number(ReadArg("--CorpusMb=", "3"));
-const NumMerges = Number(ReadArg("--Merges=", "256")); // vocab = 256 + merges
+// --Spec (opt-in here; Data/Spec.json): the per-slice mix, the context default, the epoch cap and the
+// WSD default all come from the spec. Without it the historical code/knowledge-MB path runs unchanged.
+const SpecChoice = ResolveSpec(ReadArg("--Spec=", "none"), false);
+const Spec = SpecChoice?.Spec ?? null;
+const CorpusMbArg = ReadArg("--CorpusMb=", "");
+const CorpusMb = Number(CorpusMbArg === "" ? "3" : CorpusMbArg);
+const NumMerges = Number(ReadArg("--Merges=", "256")); // vocab = 256 + merges (only when no tokenizer file is used)
 const EmbedDim = Number(ReadArg("--EmbedDim=", "128"));
 const NumLayers = Number(ReadArg("--Layers=", "4"));
 const NumHeads = Number(ReadArg("--Heads=", "4"));
-const BlockSize = Number(ReadArg("--Block=", "128"));
+const BlockSize = Number(ReadArg("--Block=", Spec !== null ? String(Spec.Training.ContextTokens) : "128"));
 const BatchSize = Number(ReadArg("--Batch=", "16"));
 const Workers = Number(ReadArg("--Workers=", "0")); // sequence-parallel worker threads; 0 = sequential
-const Steps = Number(ReadArg("--Steps=", "2000"));
-const SavePath = ReadArg("--Save=", "Checkpoints/Foundry.ckpt");
+let Steps = Number(ReadArg("--Steps=", "2000")); // replaced by --Epochs below when given
+const SavePath = ReadArg("--Save=", CheckpointFile());
 const Measure = ReadFlag("--Measure");
 // Storage precision: F32 halves tape/weight memory and feeds the 8-lane f32 kernels. Resumed runs
 // inherit the CHECKPOINT's precision below (changing width mid-run would reinterpret the weights).
 const Precision = ReadArg("--Precision=", "F64") === "F32" ? "F32" as const : "F64" as const;
+// Persisted tokenizer: explicit --Tokenizer=<file> > Data/Tokenizer.v1.json when present > learn merges
+// from this corpus ("fresh" forces that). A resume always keeps the checkpoint's merges (PickMerges).
+const TokenizerFile = ChooseTokenizerFile(ReadArg("--Tokenizer=", ""));
+// Epoch guard override: an explicit cap that replaces Spec.Training.MaxEpochs for this run.
+const AllowEpochsArg = ReadArg("--AllowEpochs=", "");
+const AllowEpochs = AllowEpochsArg === "" ? null : ReadFloatArg("--AllowEpochs", 0, { Min: Number.MIN_VALUE });
+// LR schedule for a FRESH run (a resume inherits the checkpoint's): Wsd by default under --Spec (a long
+// run that can be extended without restarting), Cosine otherwise (the historical default).
+const ScheduleKind = ReadArg("--Schedule=", Spec !== null ? "Wsd" : "Cosine");
+if (ScheduleKind !== "Wsd" && ScheduleKind !== "Cosine" && ScheduleKind !== "Constant") throw new Error(`--Schedule must be Wsd, Cosine or Constant (got '${ScheduleKind}')`);
+const DecayFraction = ReadFloatArg("--DecayFraction", 0.1, { Min: Number.MIN_VALUE });
 
 // Build the pretraining corpus from the SEPARATED kind tables, each up to its own byte budget: code
 // (--CodeMb, default = --CorpusMb for back-compat) + optional general knowledge (--KnowledgeMb). This
 // is how a base model is composed as pure-code or code+language, with the mix controlled per kind.
 const CodeMb = Number(ReadArg("--CodeMb=", String(CorpusMb)));
 const KnowledgeMb = Number(ReadArg("--KnowledgeMb=", "0"));
+// ByTier reads in ascending id order, so the same budget always selects the same documents (a resumed
+// run sees the same corpus). PartIds stays index-aligned with Parts: the id drives the train/val split.
 const Stores = ResolveFoundryStores();
 const Parts: string[] = [];
+const PartIds: string[] = [];
 async function AddKind(Which: "code" | "knowledge", BudgetMb: number): Promise<void> {
   if (BudgetMb <= 0) return;
   const Budget = Math.round(BudgetMb * 1e6);
@@ -76,14 +102,28 @@ async function AddKind(Which: "code" | "knowledge", BudgetMb: number): Promise<v
   let Count = 0;
   for (const Doc of Docs) {
     Parts.push(Doc.Content);
+    PartIds.push(Doc.Id);
     Bytes += Doc.Bytes;
     Count++;
     if (Bytes >= Budget) break;
   }
   console.log(`corpus[${Which}]: ${Count} docs, ${(Bytes / 1e6).toFixed(2)}MB`);
 }
-await AddKind("code", CodeMb);
-await AddKind("knowledge", KnowledgeMb);
+if (Spec !== null && SpecChoice !== null) {
+  // Recipe v2: the mix PER SLICE of the spec (each slice's Langs -> documents, shares from the weights).
+  // Total = --CorpusMb when given, else everything the spec asks for (the sum of its TargetMb).
+  const TotalMb = CorpusMbArg !== "" ? CorpusMb : SpecTotalMb(Spec);
+  const Mix = await AssembleSpecMix(Spec, PretrainSources(Stores), TotalMb, false);
+  for (const Line of DescribeMix(Mix)) console.log(`corpus[slice]: ${Line}`);
+  for (const Doc of Mix.Docs) {
+    Parts.push(Doc.Content);
+    PartIds.push(Doc.Id);
+  }
+  console.log(`corpus: spec ${SpecChoice.Path} (${Spec.Version}), ${Mix.Mb}MB of ${TotalMb}MB requested`);
+} else {
+  await AddKind("code", CodeMb);
+  await AddKind("knowledge", KnowledgeMb);
+}
 await Stores.Close();
 console.log(`corpus: ${Parts.length} docs total, ${(Parts.join("\n\n").length / 1e6).toFixed(2)}MB`);
 // Near-duplicate removal (MinHash): the Foundry Filtered tier dedups only EXACT bytes, so near-dups
@@ -91,14 +131,37 @@ console.log(`corpus: ${Parts.length} docs total, ${(Parts.join("\n\n").length / 
 // (b) over-weight repeated code. Apply it here, right before training. O(n^2) — fine at current scale;
 // an LSH-banded variant is the scale path.
 const KeepIdx = new Set(DedupedIndices(Parts, 0.8));
-const Docs = Parts.filter((_P, I) => KeepIdx.has(I));
-console.log(`near-dedup: ${Parts.length} -> ${Docs.length} docs`);
+const DedupedDocs = Parts.filter((_P, I) => KeepIdx.has(I));
+const DedupedIds = PartIds.filter((_P, I) => KeepIdx.has(I));
+console.log(`near-dedup: ${Parts.length} -> ${DedupedDocs.length} docs`);
+// Eval decontamination: drop every document sharing a 13-gram with the fixed eval suite or the coding
+// problem set, so the suite stays an honest held-out measurement (same rule as TrainOnCorpus/BuildCorpus).
+const Decon = Decontaminate(DedupedDocs, TrainingDecontaminationDocs());
+const Docs = Decon.Kept.map((I) => DedupedDocs[I]);
+const DocIds = Decon.Kept.map((I) => DedupedIds[I]);
+console.log(`decontamination: removed ${Decon.Removed.length} docs overlapping the eval suite -> ${Docs.length} docs`);
 // Guard: an empty/misconfigured Filtered tier would otherwise train on nothing (a degenerate vocab
 // still passes Zod) and silently produce a meaningless model.
 if (Docs.length < 2) {
-  throw new Error(`TrainOnFoundry: need >= 2 Filtered documents after near-dedup (got ${Docs.length}) — collect/curate more data first`);
+  throw new Error(`TrainOnFoundry: need >= 2 Filtered documents after near-dedup + decontamination (got ${Docs.length}) — collect/curate more data first`);
 }
 const CorpusText = Docs.join("\n\n");
+
+// --Epochs=<n>: derive Steps from the data instead of guessing it (the inverse of the epoch guard,
+// and what the train-model workflow passes). It needs the training-side token count, so the merges
+// are resolved early - the tokenizer file, else fresh merges that the real tokenizer below reuses.
+const EpochsArg = ReadArg("--Epochs=", "");
+let EarlyMerges: [number, number][] | null = null;
+if (EpochsArg !== "" && !Measure) {
+  const Epochs = ReadFloatArg("--Epochs", 0, { Min: Number.MIN_VALUE });
+  EarlyMerges = TokenizerFile !== null ? LoadBpeModel(TokenizerFile.Path).Merges : TrainBpe(CorpusText, NumMerges).Merges;
+  const EarlyTok = new SpecialTokenizer(new BytePairEncoder({ Merges: EarlyMerges }), BaseSpecials);
+  const EarlyVal = AssignValidationSides(DocIds);
+  let TrainingTokens = 0;
+  for (let I = 0; I < Docs.length; I++) if (!EarlyVal[I]) TrainingTokens += EarlyTok.EncodeBase(Docs[I]).length + 1; // + EOS
+  Steps = StepsForEpochs(Epochs, TrainingTokens, BatchSize, BlockSize);
+  console.log(`--Epochs=${Epochs}: ${TrainingTokens.toLocaleString("en-US")} training tokens at batch ${BatchSize} x context ${BlockSize} -> --Steps=${Steps}`);
+}
 
 const EffectiveSteps = Measure ? 8 : Steps;
 const CkptName = ReadArg("--Name=", "foundry");
@@ -111,46 +174,53 @@ const ResumeFlag = ReadFlag("--Resume"); // explicit "train it more" — extend 
 // run), continue from where it left off — reuse its tokenizer, weights, optimizer, and RNG. Otherwise
 // start fresh. This is what makes a long run crash-safe together with the periodic saves below.
 // Auto-resumes a same-name/same-Steps run (crash recovery); with --Resume it also EXTENDS a finished
-// model to a higher Steps (the dashboard "Resume training" flow) instead of retraining fresh.
-type BpeTokenizerState = { Kind: string; Merges: [number, number][] };
+// model to a higher Steps (the dashboard "Resume training" flow) instead of retraining fresh. A
+// same-name model that is NOT resumed is refused (overwrite guard; --Fresh overwrites deliberately).
 let Resume: { Ckpt: Checkpoint; Step: number; Merges: [number, number][] } | null = null;
 if (CkptStore !== null && !Measure && !Fresh) {
-  const Existing = await CkptStore.Load(CkptName);
-  const State = (Existing?.TokenizerState ?? null) as BpeTokenizerState | null;
-  if (Existing !== null && State !== null && State.Kind === "Bpe" && Array.isArray(State.Merges)) {
-    const M = Existing.Config.Model;
-    // VocabSize must also match: EOS + the reserved FIM sentinels add NumSpecials above the BPE vocab
-    // (256 + merges). A checkpoint predating that offset is a different architecture — reject it here
-    // so we start fresh instead of crashing later in ApplyCheckpoint's VocabSize shape check.
-    const ArchMatch = M.EmbedDim === EmbedDim && M.NumLayers === NumLayers && M.NumHeads === NumHeads && M.BlockSize === BlockSize && M.VocabSize === 256 + State.Merges.length + NumSpecials;
-    const Match = ArchMatch && (ResumeFlag || Existing.Config.Schedule.MaxSteps === EffectiveSteps);
-    const DoneStep = Number((Existing.Meta as Record<string, unknown>)["Step"] ?? 0);
-    if (Match && DoneStep < EffectiveSteps) Resume = { Ckpt: Existing, Step: DoneStep, Merges: State.Merges };
-  }
-  // OVERWRITE GUARD: a same-name checkpoint that is NOT being resumed would be silently replaced by
-  // this run's periodic saves — a finished model died that way once. Fail fast instead; overwriting
-  // must be said out loud (--Fresh), never implied by reusing a name.
-  if (Existing !== null && Resume === null) {
-    const At = Number((Existing.Meta as Record<string, unknown>)["Step"] ?? 0);
-    console.error(
-      ResumeFlag
-        ? `cannot resume "${CkptName}": the saved model (step ${At}) has a different architecture/tokenizer or is already at/past the requested ${EffectiveSteps} steps — pick a new name or raise Steps`
-        : `model "${CkptName}" already exists (step ${At}) — pick a NEW name, enable Resume to extend it, or pass --Fresh to overwrite it intentionally`,
-    );
+  const Decision = DecideResume({
+    Existing: await CkptStore.Load(CkptName),
+    Name: CkptName,
+    Steps: EffectiveSteps,
+    ResumeFlag,
+    RequireSpecials: false,
+    What: "model",
+    // VocabSize must also match: EOS + the reserved FIM/chat/tool specials add NumSpecials above the BPE
+    // vocab (256 + merges). A checkpoint predating that offset is a different architecture — rejected
+    // here so we start fresh instead of crashing later in ApplyCheckpoint's VocabSize shape check.
+    ArchMatches: (Ckpt, State) => {
+      const M = Ckpt.Config.Model;
+      return M.EmbedDim === EmbedDim && M.NumLayers === NumLayers && M.NumHeads === NumHeads && M.BlockSize === BlockSize && M.VocabSize === 256 + State.Merges.length + NumSpecials;
+    },
+  });
+  if (Decision.Refusal !== null) {
+    console.error(Decision.Refusal);
     process.exit(1);
   }
+  if (Decision.Resume !== null) Resume = { Ckpt: Decision.Resume.Ckpt, Step: Decision.Resume.Step, Merges: Decision.Resume.State.Merges };
 }
 
-// Tokenizer: reuse the checkpoint's merges when resuming, else train fresh BPE on the corpus. Wrapped
-// with an EOS special so document boundaries are a hard token in the training stream.
+// Tokenizer: the checkpoint's merges when resuming (an explicit --Tokenizer that disagrees is refused),
+// else the persisted tokenizer file, else fresh BPE on the corpus. Wrapped with an EOS special so
+// document boundaries are a hard token in the training stream.
 const T0 = Date.now();
-const Bpe = Resume !== null ? { Merges: Resume.Merges } : TrainBpe(CorpusText, NumMerges);
+let Choice: ReturnType<typeof PickMerges>;
+try {
+  Choice = PickMerges(Resume !== null ? { Merges: Resume.Merges, From: "checkpoint", Name: CkptName } : null, TokenizerFile, () => EarlyMerges ?? TrainBpe(CorpusText, NumMerges).Merges);
+} catch (Refused) {
+  console.error((Refused as Error).message);
+  if (CkptStore !== null) await CkptStore.Close();
+  process.exit(1);
+}
+const Bpe = { Merges: Choice.Merges };
 const BaseTok = new BytePairEncoder(Bpe);
 const Tokenizer = new SpecialTokenizer(BaseTok, BaseSpecials);
 const EosId = Tokenizer.Id(SpecialTokens.Eos);
-console.log(`bpe: ${Bpe.Merges.length} merges -> vocab ${Tokenizer.VocabSize}${Resume !== null ? " (reused from checkpoint)" : `; trained in ${((Date.now() - T0) / 1000).toFixed(1)}s`}`);
+console.log(`bpe: ${Bpe.Merges.length} merges -> vocab ${Tokenizer.VocabSize} (${Choice.Origin}; ${((Date.now() - T0) / 1000).toFixed(1)}s)`);
 
-const WarmupSteps = Math.max(1, Math.min(40, Math.floor(EffectiveSteps / 4)));
+// Wsd needs the warmup to end before its decay window (validated); on a tiny run clamp it there.
+const BaseWarmup = Math.max(1, Math.min(40, Math.floor(EffectiveSteps / 4)));
+const WarmupSteps = ScheduleKind === "Wsd" ? Math.min(BaseWarmup, WsdDecayStart(EffectiveSteps, DecayFraction)) : BaseWarmup;
 const EvalInterval = Measure ? EffectiveSteps + 1 : Math.max(1, Math.min(100, EffectiveSteps));
 // RESUME INHERITANCE: a resumed run continues the CHECKPOINT's training semantics — batch size,
 // optimizer, schedule shape — so a stale form/CLI value cannot change the math mid-run (a resumed
@@ -161,7 +231,7 @@ const Config = LoadConfig({
   Overrides: {
     Model: Inherited !== null ? { ...Inherited.Model } : { VocabSize: Tokenizer.VocabSize, EmbedDim, NumLayers, NumHeads, BlockSize, PositionScheme: "Rope", NormKind: "RmsNorm", MlpKind: "SwiGlu" },
     Training: { BatchSize: Inherited !== null ? Inherited.Training.BatchSize : BatchSize, Workers, EvalInterval, EvalIterations: 10, CheckpointInterval: EffectiveSteps },
-    Schedule: Inherited !== null ? { ...Inherited.Schedule, MaxSteps: EffectiveSteps } : { Kind: "Cosine", WarmupSteps, MaxSteps: EffectiveSteps, MinLrRatio: 0.1 },
+    Schedule: Inherited !== null ? { ...Inherited.Schedule, MaxSteps: EffectiveSteps } : { Kind: ScheduleKind, WarmupSteps, MaxSteps: EffectiveSteps, MinLrRatio: 0.1, DecayFraction },
     Optimizer: Inherited !== null ? { ...Inherited.Optimizer } : { Kind: "AdamW", LearningRate: 0.003 },
     Compute: Inherited !== null ? { ...Inherited.Compute } : { Precision },
   },
@@ -172,13 +242,50 @@ if (Inherited !== null) console.log(`resume: inheriting training semantics from 
 
 const ComputeChoice = ActivateFromConfig(Config);
 const Rng = CreateRngStreams(Config.Training.Seed);
-// Document-level split (shuffled) with EOS between docs — no positional train/val leak.
+// Document-level split with EOS between docs — no positional train/val leak. Membership is a property
+// of the DOCUMENT (its id hashes into a 0..99 bucket; buckets < ValPercent are validation), not of a
+// shuffle, so a resumed run — or a later run over a grown corpus — keeps every already-seen document
+// on the same side: nothing that was validation ever leaks into training.
 // EncodeBase (not Encode): pretraining docs are untrusted; EOS is added structurally below, so raw
 // text is never special-split for control tokens.
-const { Train, Val } = SplitAndEncodeDocuments(Docs, 0.1, Rng.DataRng, (Text) => Tokenizer.EncodeBase(Text), EosId);
-console.log(`split: ${Train.length} train + ${Val.length} val tokens (document-level, shuffled)`);
+// The bucket rule itself lives in Brain/Data/DocumentSplit.ts — shared with the eval suite's frozen
+// held-out set, so "validation" is the same documents in both places.
+// Both sides must be non-empty (Docs.length >= 2 is guaranteed above); AssignValidationSides moves the
+// single most-borderline document across when the hash put everything on one side.
+const IsVal = AssignValidationSides(DocIds);
+function EncodeSide(WantVal: boolean): number[] {
+  const Out: number[] = [];
+  for (let I = 0; I < Docs.length; I++) {
+    if (IsVal[I] !== WantVal) continue;
+    for (const Id of Tokenizer.EncodeBase(Docs[I])) Out.push(Id);
+    Out.push(EosId);
+  }
+  return Out;
+}
+const Train = EncodeSide(false);
+const Val = EncodeSide(true);
+const ValDocs = IsVal.filter((V) => V).length;
+console.log(`split: ${Train.length} train + ${Val.length} val tokens (document-level by id hash: ${Docs.length - ValDocs} train / ${ValDocs} val docs)`);
+// EPOCH GUARD (the memorisation check): the unique tokens are the TRAINING side; every step draws
+// Batch x Context of them. Over the spec's MaxEpochs (or --AllowEpochs) the run is refused before any
+// weight is touched, with the largest Steps that fits. Without --Spec it only reports.
+if (!Measure) {
+  const Epochs = CheckEpochs({ UniqueTokens: Train.length, Steps: EffectiveSteps, Batch: Config.Training.BatchSize, Context: Config.Model.BlockSize, MaxEpochs: Spec?.Training.MaxEpochs ?? null, AllowEpochs });
+  if (!Epochs.Ok) {
+    console.error(`epoch guard: ${Epochs.Message}`);
+    if (CkptStore !== null) await CkptStore.Close();
+    process.exit(1);
+  }
+  console.log(`epoch guard: ${Epochs.Message}`);
+}
+// Separate RNG streams: the train loader draws from DataRng (checkpointed, so resume continues the
+// exact batch sequence); validation draws from its own stream, so the NUMBER of eval draws can never
+// shift the training batch sequence. The val stream is derived from the run seed (reproducible) and
+// restarts on resume — eval batches are a measurement, not training state.
+const ValStreamSeedOffset = 0x5641; // "VA": any fixed offset; MixSeed decorrelates it from the train streams
+const ValRng = CreateRngStreams(Config.Training.Seed + ValStreamSeedOffset).DataRng;
 const TrainLoader = new InMemoryDataLoader(Train, Config.Model.BlockSize, Rng.DataRng);
-const ValLoader = new InMemoryDataLoader(Val, Config.Model.BlockSize, Rng.DataRng);
+const ValLoader = new InMemoryDataLoader(Val, Config.Model.BlockSize, ValRng);
 const Model = new Shahd(Config, Rng.InitRng);
 const Optimizer = CreateOptimizer(Model.Parameters(), Config);
 let StartStep = 0;
@@ -216,8 +323,7 @@ if (Measure) {
 // re-running resumes from the last saved checkpoint (nothing done is thrown away). A graceful pause
 // (--StopFile appears — the dashboard's Stop button) saves at the EXACT step instead: TrainLoop polls
 // the file once per step and returns early, we checkpoint at that step and exit 0.
-const StopFile = ReadArg("--StopFile=", "");
-const ShouldStop = StopFile === "" ? undefined : (): boolean => existsSync(StopFile);
+const ShouldStop = StopFilePredicate(ReadArg("--StopFile=", ""));
 const CheckEvery = Math.max(50, Math.floor(EffectiveSteps / 20)); // ~20 saves across the run
 function BuildAt(Step: number): Checkpoint {
   return BuildCheckpoint(Model, Optimizer, Rng, { FinalStep: EffectiveSteps, Step, Corpus: "foundry-filtered" }, { Kind: "Bpe", Merges: Bpe.Merges, Specials: BaseSpecials });

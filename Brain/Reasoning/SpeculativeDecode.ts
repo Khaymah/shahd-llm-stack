@@ -56,8 +56,9 @@ export function SpeculativeDecodeGreedy(
       const Proposed: number[] = [];
       const Work = [...Ids];
       for (let I = 0; I < G; I++) {
-        const Logits = Draft.Forward(Work.slice(-DraftBlockSize));
-        const Tok = ArgmaxAt(Logits.Data, Logits.Rows - 1, Vocab, DummyRng);
+        // Only the draft's last row is read: the head runs for that row alone (ForwardLastLogits).
+        const Logits = Draft.ForwardLastLogits(Work.slice(-DraftBlockSize));
+        const Tok = ArgmaxAt(Logits.Data, 0, Vocab, DummyRng);
         Proposed.push(Tok);
         Work.push(Tok);
       }

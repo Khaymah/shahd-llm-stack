@@ -1,0 +1,298 @@
+{
+  "Version": "ci-1",
+  "Domain": "CI-sized subset of Data/Spec.json: a web-dev coding corpus small enough to train a 3M-parameter model on a GitHub runner in about an hour.",
+  "Slices": {
+    "ts": {
+      "TargetMb": 6,
+      "Langs": [
+        "typescript"
+      ]
+    },
+    "js": {
+      "TargetMb": 2,
+      "Langs": [
+        "javascript"
+      ]
+    },
+    "html": {
+      "TargetMb": 1,
+      "Langs": [
+        "html",
+        "vue",
+        "svelte",
+        "astro"
+      ]
+    },
+    "css": {
+      "TargetMb": 1.5,
+      "Langs": [
+        "css",
+        "scss",
+        "sass",
+        "less"
+      ]
+    },
+    "go": {
+      "TargetMb": 3,
+      "Langs": [
+        "go"
+      ]
+    },
+    "sql": {
+      "TargetMb": 0.5,
+      "Langs": [
+        "sql"
+      ]
+    },
+    "docs": {
+      "TargetMb": 2,
+      "Langs": [
+        "text-en",
+        "markdown",
+        "text-knowledge",
+        "text",
+        "text-books"
+      ]
+    }
+  },
+  "Repos": [
+    {
+      "Repo": "colinhacks/zod",
+      "Slice": "ts",
+      "Include": [
+        "packages/zod/src/**"
+      ],
+      "Note": "MIT. Schema validation, idiomatic generics and inference. Tests KEPT (v4 test suite is exemplary)."
+    },
+    {
+      "Repo": "honojs/hono",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Web-standard router/middleware, small clean modules. Tests KEPT (co-located *.test.ts)."
+    },
+    {
+      "Repo": "immerjs/immer",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Structural sharing via proxies; compact and well commented."
+    },
+    {
+      "Repo": "sindresorhus/ky",
+      "Slice": "ts",
+      "Include": [
+        "source/**",
+        "test/**"
+      ],
+      "Note": "MIT. fetch wrapper, exemplary small library. Tests KEPT."
+    },
+    {
+      "Repo": "kysely-org/kysely",
+      "Slice": "ts",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Type-safe SQL query builder."
+    },
+    {
+      "Repo": "expressjs/express",
+      "Slice": "js",
+      "Include": [
+        "index.js",
+        "lib/**",
+        "test/**"
+      ],
+      "Note": "MIT. The classic Node web framework. Tests KEPT (mocha + supertest)."
+    },
+    {
+      "Repo": "iamkun/dayjs",
+      "Slice": "js",
+      "Include": [
+        "src/**"
+      ],
+      "Exclude": [
+        "src/locale/**"
+      ],
+      "Note": "MIT. Date library + plugin pattern; locales dropped."
+    },
+    {
+      "Repo": "ai/nanoid",
+      "Slice": "js",
+      "Exclude": [
+        "test/**",
+        "**/*.test.*"
+      ],
+      "Note": "MIT. Tiny, carefully optimised ID generator."
+    },
+    {
+      "Repo": "chalk/chalk",
+      "Slice": "js",
+      "Include": [
+        "source/**"
+      ],
+      "Note": "MIT. Terminal styling, modern ESM."
+    },
+    {
+      "Repo": "h5bp/html5-boilerplate",
+      "Slice": "html",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Reference HTML document skeleton (small)."
+    },
+    {
+      "Repo": "argyleink/open-props",
+      "Slice": "css",
+      "Include": [
+        "src/**"
+      ],
+      "Note": "MIT. Design tokens as CSS custom properties."
+    },
+    {
+      "Repo": "picocss/pico",
+      "Slice": "css",
+      "Include": [
+        "scss/**"
+      ],
+      "Note": "MIT. Semantic-HTML CSS framework (SCSS)."
+    },
+    {
+      "Repo": "necolas/normalize.css",
+      "Slice": "css",
+      "Include": [
+        "normalize.css"
+      ],
+      "Note": "MIT. The reference cross-browser reset (one well-commented file)."
+    },
+    {
+      "Repo": "gin-gonic/gin",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. The most common Go HTTP framework."
+    },
+    {
+      "Repo": "go-chi/chi",
+      "Slice": "go",
+      "Exclude": [
+        "_examples/**",
+        "**/testdata/**"
+      ],
+      "Note": "MIT. net/http-compatible router; idiomatic middleware. Tests KEPT."
+    },
+    {
+      "Repo": "spf13/cobra",
+      "Slice": "go",
+      "Exclude": [
+        "**/*_test.go",
+        "site/**"
+      ],
+      "Note": "Apache-2.0. CLI framework."
+    },
+    {
+      "Repo": "google/uuid",
+      "Slice": "go",
+      "Note": "BSD-3-Clause. Small, idiomatic package. Tests KEPT."
+    },
+    {
+      "Repo": "jOOQ/sakila",
+      "Slice": "sql",
+      "Include": [
+        "**/*.sql"
+      ],
+      "Note": "REVIEW LICENSE (README states BSD). The Sakila sample schema in several dialects; data dumps exceed MaxFileBytes and drop out."
+    },
+    {
+      "Repo": "kysely-org/kysely",
+      "Slice": "docs",
+      "Include": [
+        "site/docs/**"
+      ],
+      "Note": "MIT. SQL-builder recipes."
+    },
+    {
+      "Repo": "spf13/cobra",
+      "Slice": "docs",
+      "Include": [
+        "site/content/**",
+        "README.md"
+      ],
+      "Note": "Apache-2.0."
+    },
+    {
+      "Repo": "gin-gonic/gin",
+      "Slice": "docs",
+      "Include": [
+        "docs/**",
+        "README.md"
+      ],
+      "Note": "MIT."
+    },
+    {
+      "Repo": "nestjs/docs.nestjs.com",
+      "Slice": "docs",
+      "Include": [
+        "content/**"
+      ],
+      "Note": "MIT. Architecture-heavy framework docs."
+    },
+    {
+      "Repo": "withastro/docs",
+      "Slice": "docs",
+      "Include": [
+        "src/content/docs/en/**"
+      ],
+      "Note": "REVIEW LICENSE (believed MIT). English docs only."
+    },
+    {
+      "Repo": "colinhacks/zod",
+      "Slice": "docs",
+      "Include": [
+        "packages/docs/content/**",
+        "README.md"
+      ],
+      "Note": "MIT. REVIEW PATHS: docs moved into packages/docs with v4."
+    }
+  ],
+  "Exclusions": {
+    "MinFileBytes": 200,
+    "MaxFileBytes": 51200,
+    "PathGlobs": [
+      "**/fixtures/**",
+      "**/__fixtures__/**",
+      "**/__snapshots__/**",
+      "**/snapshots/**",
+      "**/*.snap",
+      "**/__mocks__/**",
+      "**/i18n/**",
+      "**/locale/**",
+      "**/locales/**",
+      "**/*.min.*",
+      "**/*.d.ts",
+      "**/*.stories.*",
+      "**/benchmark/**",
+      "**/benchmarks/**",
+      "**/node_modules/**",
+      "**/vendor/**",
+      "**/third_party/**",
+      "**/dist/**",
+      "**/*.generated.*",
+      "**/*.pb.go",
+      "**/zz_generated*",
+      "**/CHANGELOG*",
+      "**/LICENSE*",
+      "**/CODE_OF_CONDUCT*",
+      "**/SECURITY*"
+    ]
+  },
+  "Training": {
+    "MaxEpochs": 4,
+    "ContextTokens": 256,
+    "VocabSize": 8192
+  }
+}

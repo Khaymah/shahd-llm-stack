@@ -7,6 +7,7 @@ import type { ResolvedConfig } from "../Config/ConfigTypes.ts";
 import { Add } from "../Ops/OpsBarrel.ts";
 import { NormLayer } from "./NormLayer.ts";
 import { MultiHeadAttention } from "./MultiHeadAttention.ts";
+import type { KvSink } from "./MultiHeadAttention.ts";
 import { Mlp } from "./Mlp.ts";
 
 export class Block {
@@ -23,8 +24,9 @@ export class Block {
     this.Mlp = new Mlp(Config, Rng);
   }
 
-  Forward(X: Tensor): Tensor {
-    let Y = Add(X, this.Attn.Forward(this.Ln1.Forward(X))); // pre-norm + residual
+  /** Sink (optional) observes this block's per-KV-head K/V — see MultiHeadAttention.KvSink. */
+  Forward(X: Tensor, Sink?: KvSink): Tensor {
+    let Y = Add(X, this.Attn.Forward(this.Ln1.Forward(X), Sink)); // pre-norm + residual
     Y = Add(Y, this.Mlp.Forward(this.Ln2.Forward(Y)));
     return Y;
   }

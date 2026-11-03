@@ -5,7 +5,7 @@
 // (At toy scale this is mechanism, not competence — CAPABILITIES.md's mechanism-vs-quality split.)
 
 import type { ChatMessage } from "./ChatTemplate.ts";
-import { ToolTokens } from "../Serving/ToolProtocol.ts";
+import { FormatToolResult, ToolTokens } from "../Serving/ToolProtocol.ts";
 import { WrapThinking } from "../Reasoning/ThinkingMode.ts";
 
 export type ToolExemplar = {
@@ -29,24 +29,22 @@ export const ToolUseExemplars: ToolExemplar[] = [
   { User: "Remember that the API base URL is https://api.example.com", CallThinking: "The user wants me to remember the API base URL. I should use the memory_store tool.", Call: { name: "memory_store", arguments: { key: "api_base_url", value: "https://api.example.com" } }, Result: { stored: true, key: "api_base_url" }, AnswerThinking: "The value was stored under api_base_url.", Answer: "Saved the API base URL." },
 ];
 
-function CallText(Call: ToolExemplar["Call"]): string {
+/** The assistant-side text of one tool call: the JSON {name, arguments} between the call sentinels.
+ *  The single home of this shape for authored SFT data (BuildToolConversation, ChatDocument). */
+export function ToolCallText(Call: ToolExemplar["Call"]): string {
   return `${ToolTokens.CallStart}${JSON.stringify(Call)}${ToolTokens.CallEnd}`;
-}
-
-function ResultText(Result: Record<string, unknown>): string {
-  return `${ToolTokens.ResultStart}${JSON.stringify(Result)}${ToolTokens.ResultEnd}`;
 }
 
 /** Turn an exemplar into a 5-message SFT conversation (system, user, tool-call, result, answer).
  *  When the exemplar carries thinking, each assistant turn starts with its <|think|> scratchpad. */
 export function BuildToolConversation(Exemplar: ToolExemplar, SystemPrompt: string): ChatMessage[] {
-  const CallContent = Exemplar.CallThinking !== undefined ? WrapThinking(Exemplar.CallThinking, CallText(Exemplar.Call)) : CallText(Exemplar.Call);
+  const CallContent = Exemplar.CallThinking !== undefined ? WrapThinking(Exemplar.CallThinking, ToolCallText(Exemplar.Call)) : ToolCallText(Exemplar.Call);
   const AnswerContent = Exemplar.AnswerThinking !== undefined ? WrapThinking(Exemplar.AnswerThinking, Exemplar.Answer) : Exemplar.Answer;
   return [
     { Role: "System", Content: SystemPrompt },
     { Role: "User", Content: Exemplar.User },
     { Role: "Assistant", Content: CallContent }, // trainable: think, then emit the tool call
-    { Role: "User", Content: ResultText(Exemplar.Result) }, // tool result fed back
+    { Role: "User", Content: FormatToolResult(Exemplar.Result) }, // tool result fed back (same text the agent loop feeds)
     { Role: "Assistant", Content: AnswerContent }, // trainable: think, then answer from the result
   ];
 }

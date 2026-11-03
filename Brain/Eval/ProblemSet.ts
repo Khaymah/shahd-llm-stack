@@ -4,7 +4,7 @@
 //   • Reference — a known-good solution (proves the tests are correct; every reference MUST pass its
 //                 own tests — asserted in Tests/Eval.Test.ts),
 //   • Tests     — TypeScript that references the candidate's definition and THROWS on any failure, run
-//                 in the sandboxed CodeExecutor (exit 0 = pass).
+//                 by the resource-capped CodeExecutor (pass = the runner prints the per-run nonce after all tests).
 // Kept intentionally small + self-contained (pure functions, no imports) so a candidate solution can be
 // prepended and executed directly. This is genuine ground truth, not a placeholder — a toy model will
 // pass few/none of these, which the STaR script reports honestly (capability is scale-bound; the loop

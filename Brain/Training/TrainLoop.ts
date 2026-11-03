@@ -9,7 +9,8 @@ import type { Logger } from "../Logging/Logger.ts";
 import type { TrainWorkerPool } from "./WorkerPool.ts";
 import { AccumulateGradients } from "./GradAccumulation.ts";
 import { EvalLoss } from "./EvalLoop.ts";
-import { ClipGradGlobalNorm, ComputeLr } from "../Optim/OptimBarrel.ts";
+import { ComputeLr } from "../Optim/OptimBarrel.ts";
+import { ClipGradsChecked } from "./RunTrainingSteps.ts";
 
 function Round(X: number): number {
   return Math.round(X * 1e4) / 1e4;
@@ -47,10 +48,8 @@ export function TrainLoop(
     const TrainLoss = Pool != null
       ? Pool.Accumulate(TrainLoader, Config.Training.BatchSize)
       : AccumulateGradients(Model, Optimizer, TrainLoader, Config.Training.BatchSize);
-    const GradNorm = ClipGradGlobalNorm(Optimizer.Params, Config.Optimizer.GradClipNorm);
-    if (!Number.isFinite(GradNorm)) {
-      throw new Error(`Non-finite gradient norm at step ${Step}: ${GradNorm}`);
-    }
+    // Clip + non-finite guard (shared with the SFT script): throws before Optimizer.Step on NaN/Inf.
+    const GradNorm = ClipGradsChecked(Optimizer.Params, Config.Optimizer.GradClipNorm, Step);
     Optimizer.Step(Lr);
     OnStep?.(Step, TrainLoss, Date.now() - StartMs);
 

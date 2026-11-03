@@ -1,0 +1,20 @@
+:root {
+  --color-primary: #1f6feb;
+  --color-text: #1b1f24;
+  --space-2: 0.5rem;
+  --space-4: 1rem;
+  --radius: 6px;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  color: var(--color-text);
+}
+
+.button {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius);
+  background: var(--color-primary);
+  color: white;
+}

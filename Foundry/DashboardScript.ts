@@ -77,7 +77,7 @@ export const DashboardScript = `
    +'<div style="color:var(--mut);font-size:12.5px;margin:3px 0 14px">'+fmtN(m.TotalParams)+' params · emb'+m.EmbedDim+' · L'+m.NumLayers+' · ctx'+m.BlockSize+'</div>'
    +'<div class="row c2"><div><div class="k" style="font-size:11px;color:var(--mut)">VOCAB</div><div class="mono" style="font-size:15px">'+fmtN(m.VocabSize)+'</div></div>'
    +'<div><div class="k" style="font-size:11px;color:var(--mut)">POSITION / NORM</div><div class="mono" style="font-size:15px">'+H(m.PositionScheme)+' / '+H(m.NormKind)+'</div></div></div>'
-   +'<div style="display:flex;gap:8px;margin-top:16px"><button class="btn pri sm" onclick="location.hash=\\'#chat\\'">Open in Chat</button></div>';
+   +'<div style="display:flex;gap:8px;margin-top:16px"><button class="btn pri sm" data-act="open-chat">Open in Chat</button></div>';
  }
  function setJobs(){var t=collecting?'Collecting':training?'Training':'Idle';Q('ov-jobs').textContent=t;Q('ov-jobs-s').textContent=(collecting||training)?'run in progress':'no run in progress';}
 
@@ -118,14 +118,14 @@ export const DashboardScript = `
  function cStart(){if(!wsReady())return;save();WS.send(JSON.stringify({type:'learn',settings:collectSettings()}));}
  function cStop(){if(wsReady()){WS.send(JSON.stringify({type:'learn-stop'}));Q('c-start').textContent='stopping…';Q('c-start').disabled=true;}}
  function setCollectBtn(run){collecting=run;setJobs();var b=Q('c-start');b.disabled=false;b.textContent=run?'■ Stop':'▶ Start collection';b.className='btn '+(run?'danger':'pri');b.onclick=run?cStop:cStart;Q('c-stop').style.display='none';}
- var cMax=5,cSeen=0,cNew=0,cSkip=0;
+ var cMax=5,cSeen=0,cNew=0,cSkip=0,cErrs=0;
  function cProg(f,busy,label){var p=Q('c-prog');p.className='prog'+(busy?' busy':'');Q('c-progi').style.width=Math.max(0,Math.min(1,f))*100+'%';Q('c-plabel').textContent=label;}
  function onLearn(e){var log=Q('c-log');
-  if(e.kind==='start'){cMax=e.repos||5;cSeen=0;cNew=0;cSkip=0;setCollectBtn(true);Q('c-badge').className='pill run';Q('c-badge').textContent='collecting';log.innerHTML='';logLine(log,'collecting from '+e.source+' ('+(e.query||'own repos')+')','a');cProg(.02,false,'0 / '+cMax);}
+  if(e.kind==='start'){cMax=e.repos||5;cSeen=0;cNew=0;cSkip=0;cErrs=0;setCollectBtn(true);Q('c-badge').className='pill run';Q('c-badge').textContent='collecting';log.innerHTML='';logLine(log,'collecting from '+e.source+' ('+(e.query||'own repos')+')','a');cProg(.02,false,'0 / '+cMax);}
   else if(e.kind==='scanning'){cProg(1,true,e.label);logLine(log,e.label,'a');}
   else if(e.kind==='repo'){cSeen++;if(e.ingested)cNew++;else cSkip++;logLine(log,(e.ingested?'stored ':'skip ')+e.repo+' ['+e.level+', '+e.files+' files]'+(e.ingested?'':(e.reason?' ('+e.reason+')':'')),e.ingested?'ok':'');cProg(cSeen/cMax,false,cSeen+' / '+cMax+' · '+cNew+' new · '+cSkip+' skipped');}
   else if(e.kind==='repo-progress'){cProg(e.filesTotal?e.filesDone/e.filesTotal:0,false,'ingesting '+e.repo+' — '+e.filesDone+' / '+e.filesTotal+' files');}
-  else if(e.kind==='done'){setCollectBtn(false);Q('c-badge').className='pill done';Q('c-badge').textContent='done';
+  else if(e.kind==='done'){setCollectBtn(false);Q('c-badge').className='pill '+(cErrs?'err':'done');Q('c-badge').textContent=cErrs?'done with errors':'done';
    var nw=(e['new']!=null?e['new']:cNew),dup=(e.duplicate!=null?e.duplicate:0);
    var life=(e.collected!=null?' · lifetime '+fmtN(e.collected):'');
    cProg(1,false,nw+' new · '+dup+' duplicate · '+e.ingested+' processed');
@@ -134,7 +134,8 @@ export const DashboardScript = `
    else if(nw===0&&e.ingested>0){logLine(log,e.semantics==='bounded'?'0 new: nothing new from this bounded source this run.':'0 new: everything fetched this run was already collected — try a different query/language, or run again for fresh items.','w');}
    else if(e.ingested===0){logLine(log,'nothing fetched this run — check the source/query (or the log above for rate-limit errors).','w');}
    loadOverview();}
-  else if(e.kind==='error'){setCollectBtn(false);Q('c-badge').className='pill err';Q('c-badge').textContent='error';logLine(log,'error: '+e.message,'e');}
+  // error is NOT terminal: the server reports non-fatal failures mid-run and always ends with done.
+  else if(e.kind==='error'){cErrs++;Q('c-badge').className='pill err';Q('c-badge').textContent='error';logLine(log,'error: '+e.message,'e');}
  }
 
  // ── Data browser ──
@@ -153,7 +154,7 @@ export const DashboardScript = `
     +'<td class="mono clip" title="'+H(d.provenance)+'">'+H(d.provenance)+'</td>'
     +'<td><span class="tier-'+H(d.tier)+'">'+H(d.tier)+'</span></td>'
     +'<td class="mono">'+H(d.lang)+'</td><td class="mono">'+H(d.license)+'</td><td class="mono tnum">'+fmtB(d.bytes)+'</td>'
-    +'<td><div class="acts"><button class="btn sm" onclick="openDoc(\\''+H(kind)+'\\',\\''+H(d.id)+'\\')">View</button><button class="btn sm danger" onclick="dDelete(\\''+H(kind)+'\\',\\''+H(d.id)+'\\')">Delete</button></div></td></tr>';}).join('');
+    +'<td><div class="acts"><button class="btn sm" data-act="doc-view" data-kind="'+H(kind)+'" data-id="'+H(d.id)+'">View</button><button class="btn sm danger" data-act="doc-del" data-kind="'+H(kind)+'" data-id="'+H(d.id)+'">Delete</button></div></td></tr>';}).join('');
    var pages=Math.max(1,Math.ceil(dTotal/dSize));
    Q('d-total').textContent=fmtN(dTotal)+' document'+(dTotal===1?'':'s');
    Q('d-pageinfo').textContent='page '+(dPage+1)+' of '+pages;
@@ -169,7 +170,8 @@ export const DashboardScript = `
   if(dTotal%dSize===1&&dPage>0)dPage--;dReload();loadOverview();}
  async function dBulk(){var kind=Q('d-kind').value;
   if(prompt('This permanently deletes ALL '+fmtN(dTotal)+' matching documents in "'+kind+'". Type DELETE to confirm.')!=='DELETE')return;
-  var r=await (await fetch('/api/browse/delete-matching',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:kind,tier:Q('d-tier').value,lang:Q('d-lang').value,license:Q('d-license').value,q:Q('d-q').value})})).json();
+  var r=await (await fetch('/api/browse/delete-matching',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:kind,tier:Q('d-tier').value,lang:Q('d-lang').value,license:Q('d-license').value,q:Q('d-q').value,confirm:true})})).json();
+  if(r.error){alert('Delete failed: '+r.error);return;}
   alert('Deleted '+fmtN(r.deleted)+' documents.');dPage=0;dLoad();loadOverview();}
  async function openDoc(kind,id){var m=Q('modal');Q('m-title').textContent=id;Q('m-meta').textContent='';Q('m-body').textContent='loading…';m.classList.add('open');
   try{var f=await (await fetch('/api/browse/doc?kind='+encodeURIComponent(kind)+'&id='+encodeURIComponent(id))).json();if(f.error){Q('m-body').textContent='error: '+f.error;return;}
@@ -253,9 +255,9 @@ export const DashboardScript = `
     +'<td><span class="pill '+(c.Format==='chat'?'chat':'base')+'">'+H(c.Format)+'</span></td>'
     +'<td class="mono tnum">'+fmtP(c.Params)+'</td><td class="mono">'+H(c.Arch)+'</td>'
     +'<td class="mono tnum">step '+fmtN(c.Step)+'</td><td style="color:var(--mut)">'+H((c.CreatedAt||'').slice(0,10))+'</td>'
-    +'<td><div class="acts"><button class="btn sm'+(loaded?'':' pri')+'" onclick="openModel(\\''+H(c.Name)+'\\')">Open in Chat</button>'
-    +'<button class="btn sm" onclick="resumeModel(\\''+H(c.Name)+'\\')">Resume training</button>'
-    +'<button class="btn sm danger" onclick="deleteModel(\\''+H(c.Name)+'\\')">Delete</button></div></td></tr>';}).join('');}
+    +'<td><div class="acts"><button class="btn sm'+(loaded?'':' pri')+'" data-act="model-open" data-name="'+H(c.Name)+'">Open in Chat</button>'
+    +'<button class="btn sm" data-act="model-resume" data-name="'+H(c.Name)+'">Resume training</button>'
+    +'<button class="btn sm danger" data-act="model-del" data-name="'+H(c.Name)+'">Delete</button></div></td></tr>';}).join('');}
  // The SPA #chat view is the ONLY surface that renders the reasoning trace (the legacy /chat page has
  // no chat-trace handler) — so "Open in Chat" must land there, not on the trace-blind page.
  function openModel(name){if(wsReady())WS.send(JSON.stringify({type:'load-model',name:name}));location.hash='#chat';}
@@ -330,11 +332,23 @@ export const DashboardScript = `
  function save(){var o={};FIELDS.forEach(function(id){var el=Q(id);if(!el)return;o[id]=el.type==='checkbox'?el.checked:el.value;});try{localStorage.setItem('shahd.cfg',JSON.stringify(o));}catch(e){}}
  function restore(){try{var o=JSON.parse(localStorage.getItem('shahd.cfg')||'{}');FIELDS.forEach(function(id){if(o[id]===undefined)return;var el=Q(id);if(!el)return;if(el.type==='checkbox')el.checked=!!o[id];else el.value=o[id];});}catch(e){}}
 
+ // ── row actions: ONE delegated listener reads data-* attributes (escaped by H, read back as plain
+ // text) — generated rows carry no inline handlers, so a hostile id/name can never become script ──
+ function onAction(e){var el=e.target&&e.target.closest?e.target.closest('[data-act]'):null;if(!el)return;
+  var act=el.getAttribute('data-act'),kind=el.getAttribute('data-kind')||'',id=el.getAttribute('data-id')||'',name=el.getAttribute('data-name')||'';
+  if(act==='open-chat')location.hash='#chat';
+  else if(act==='doc-view')openDoc(kind,id);
+  else if(act==='doc-del')dDelete(kind,id);
+  else if(act==='model-open')openModel(name);
+  else if(act==='model-resume')resumeModel(name);
+  else if(act==='model-del')deleteModel(name);}
+
  // ── init ──
  function init(){
   applyTheme((function(){try{return localStorage.getItem('shahd.theme');}catch(e){return null;}})()||(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'));
   var links=document.querySelectorAll('.nav a[data-v]');for(var i=0;i<links.length;i++)links[i].addEventListener('click',function(e){e.preventDefault();location.hash='#'+this.getAttribute('data-v');});
   document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
+  document.addEventListener('click',onAction);
   Q('d-kind').addEventListener('change',function(){dPage=0;dLoad();});
   Q('ch-box').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();chSend();}});
   restore();pickSource('github');setMode('pretrain');

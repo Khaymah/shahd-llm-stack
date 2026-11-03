@@ -47,9 +47,10 @@ test("GQA validation rejects KvHeads not dividing NumHeads", () => {
   ).toThrow();
 });
 
-test("modern-stack model generates (uncached); cached path guards", () => {
+test("modern-stack model generates; cached path matches the uncached path", () => {
   const Model = Build({ EmbedDim: 8, NumLayers: 1, NumHeads: 2, BlockSize: 8, VocabSize: 10, MlpRatio: 2, PositionScheme: "Rope", NormKind: "RmsNorm", MlpKind: "SwiGlu" });
   const Out = Generate(Model, [1, 2, 3], 4, DefaultSampling, new SeededRng(1));
   expect(Out.length).toBe(7);
-  expect(() => CachedGenerate(Model, [1, 2, 3], 2, DefaultSampling, new SeededRng(1))).toThrow(/modern/i);
+  const Greedy = { ...DefaultSampling, Temperature: 0 };
+  expect(CachedGenerate(Model, [1, 2, 3], 4, Greedy, new SeededRng(1))).toEqual(Generate(Model, [1, 2, 3], 4, Greedy, new SeededRng(1)));
 });

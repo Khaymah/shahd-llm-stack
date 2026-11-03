@@ -47,3 +47,4 @@ console.log(`store=${Kind} | token=${GitHubToken() ? "yes" : "no (rate-limited)"
 const Stats = await IngestFromWeb(Providers, Queries, Store, new Date().toISOString(), Number(ReadArg("--PerQuery=", "5")), Config.Data.EmbeddingDim);
 console.log(`\ningested ${Stats.Ingested} files -> Filtered=${Stats.ByTier.Filtered} Raw=${Stats.ByTier.Raw} Rejected=${Stats.ByTier.Rejected}\n`);
 console.log(RenderReportText(BuildReport(await Store.All())));
+await Store.Close?.(); // release the Postgres pool, otherwise the open sockets keep the process alive forever

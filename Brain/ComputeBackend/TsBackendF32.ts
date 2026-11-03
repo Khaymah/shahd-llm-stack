@@ -7,6 +7,7 @@
 // the parity test against TsBackend, and F64 stays the default for any run whose exactness matters.
 
 import type { ComputeBackend } from "./ComputeBackend.ts";
+import type { NumArray } from "../Tensor/Tensor.ts";
 
 export class TsBackendF32 implements ComputeBackend {
   MatMul(A: Float64Array, B: Float64Array, M: number, K: number, N: number): Float64Array {
@@ -24,5 +25,23 @@ export class TsBackendF32 implements ComputeBackend {
       }
     }
     return Float64Array.from(Out);
+  }
+
+  /** Out[M,N] = A[M,K] @ Btᵀ (Bt stored [N,K]), with operands and the running sum rounded to f32
+   *  exactly like MatMul above. Writes into the caller's Out (whatever its element type). */
+  MatMulNtInto(A: NumArray, Bt: NumArray, Out: NumArray, M: number, K: number, N: number): void {
+    const Af = Float32Array.from(A.subarray(0, M * K));
+    const Bf = Float32Array.from(Bt.subarray(0, N * K));
+    const Sum = new Float32Array(1); // one-slot f32 accumulator: every += rounds to f32
+    for (let I = 0; I < M; I++) {
+      const IK = I * K;
+      const IN = I * N;
+      for (let J = 0; J < N; J++) {
+        const JK = J * K;
+        Sum[0] = 0;
+        for (let P = 0; P < K; P++) Sum[0] += Af[IK + P] * Bf[JK + P];
+        Out[IN + J] = Sum[0];
+      }
+    }
   }
 }

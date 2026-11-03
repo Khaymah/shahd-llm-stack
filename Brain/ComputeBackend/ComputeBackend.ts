@@ -18,7 +18,8 @@ import type { NumArray } from "../Tensor/Tensor.ts";
 // Buffers arrive in the RUN's storage precision (NumArray = Float64Array | Float32Array). A backend
 // must either handle both widths (GoFfiBackend dispatches to the f64/f32 kernel by element type) or
 // be routed only under the precision it supports (BackendSelector's job). All buffers of one call
-// always share one element type — mixed-width operands never occur.
+// must share one element type — native backends ENFORCE this (and buffer lengths) per call via
+// ValidateMatMulArgs, because a mixed-width or short buffer is an out-of-bounds access in C.
 export interface ComputeBackend {
   /** Out[M,N] = A[M,K] @ B[K,N], row-major. Allocates and returns the result. */
   MatMul(A: NumArray, B: NumArray, M: number, K: number, N: number): NumArray;
@@ -29,6 +30,11 @@ export interface ComputeBackend {
   /** OPTIONAL backward half dA: Out[M,N] += A[M,K] @ Btᵀ, where Bt is stored [N,K] row-major —
    *  i.e. the second operand arrives ALREADY transposed, so the backend must not transpose again. */
   MatMulNtAcc?(A: NumArray, Bt: NumArray, Out: NumArray, M: number, K: number, N: number): void;
+
+  /** OPTIONAL NT forward: Out[M,N] = A[M,K] @ Btᵀ (fully OVERWRITTEN), Bt stored [N,K] row-major —
+   *  e.g. attention scores Q @ Kᵀ or a tied LM head (X @ Embᵀ) with no transpose materialized.
+   *  Same layout as MatMulNtAcc; only the write mode differs (no zero-fill needed beforehand). */
+  MatMulNtInto?(A: NumArray, Bt: NumArray, Out: NumArray, M: number, K: number, N: number): void;
 
   /** OPTIONAL backward half dB: Db[K,N] += Aᵀ @ DOut, where A is [M,K] and DOut is [M,N] — the
    *  first operand is consumed transposed IN PLACE (no [K,M] copy of A may be materialized). */

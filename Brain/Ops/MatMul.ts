@@ -6,16 +6,45 @@
 // tape always stays here in TypeScript; only the numeric matmul bodies are delegated.
 
 import { Tensor } from "../Tensor/Tensor.ts";
-import type { NumArray, NumArrayCtor } from "../Tensor/Tensor.ts";
+import type { NumArrayCtor } from "../Tensor/Tensor.ts";
 import { Tape } from "../Tensor/Tape.ts";
 import { GetActiveBackend } from "../ComputeBackend/BackendSelector.ts";
+import { AccumulateInto, TransposeBuffer } from "./Internal/MatMulPlumbing.ts";
 
-function Transpose(Data: NumArray, Rows: number, Cols: number): NumArray {
-  const Out = new (Data.constructor as NumArrayCtor)(Rows * Cols);
-  for (let R = 0; R < Rows; R++) {
-    for (let C = 0; C < Cols; C++) Out[C * Rows + R] = Data[R * Cols + C];
+/** Inline backward: dA[M,K] += dOut @ Bᵀ ; dB[K,N] += Aᵀ @ dOut.
+ *
+ *  I,P,J order: the inner J loop reads B / writes dB with stride 1 (cache-friendly, matching the
+ *  forward's ikj order). dA[I,P] lives in a REGISTER accumulator across the J loop instead of being
+ *  re-read and re-stored N times — same additions in the same (J-ascending) order, starting from the
+ *  stored value, so the result is bit-identical. Under F32 storage the old per-iteration store
+ *  rounded to f32 every step, so the accumulator does too (Math.fround) to stay bit-identical. */
+function InlineMatMulBackward(A: Tensor, B: Tensor, Out: Tensor, M: number, K: number, N: number): void {
+  const AData = A.Data;
+  const BData = B.Data;
+  const OutGrad = Out.Grad;
+  const AGrad = A.Grad;
+  // MatMul(X, X) aliases the two grad buffers; dB writes would then land inside a dA cell that the
+  // register accumulator is holding. Route dB through a scratch in that (never-in-the-model) case.
+  const Aliased = A === B;
+  const BGrad = Aliased ? new (AGrad.constructor as NumArrayCtor)(K * N) : B.Grad;
+  const RoundToF32 = AGrad instanceof Float32Array;
+  for (let I = 0; I < M; I++) {
+    const RowOut = I * N;
+    for (let P = 0; P < K; P++) {
+      const IdxA = I * K + P;
+      const AVal = AData[IdxA];
+      const RowB = P * N;
+      let Acc = AGrad[IdxA];
+      for (let J = 0; J < N; J++) {
+        const G = OutGrad[RowOut + J];
+        if (G === 0) continue;
+        Acc = RoundToF32 ? Math.fround(Acc + G * BData[RowB + J]) : Acc + G * BData[RowB + J];
+        BGrad[RowB + J] += G * AVal;
+      }
+      AGrad[IdxA] = Acc;
+    }
   }
-  return Out;
+  if (Aliased) AccumulateInto(AGrad, BGrad, K * N);
 }
 
 export function MatMul(A: Tensor, B: Tensor): Tensor {
@@ -30,11 +59,16 @@ export function MatMul(A: Tensor, B: Tensor): Tensor {
   const Backend = GetActiveBackend();
   if (Backend === null) {
     // Inline f64 fast path (default): bit-identical, gradcheck-exact, no allocation beyond Out.
+    const AData = A.Data;
+    const BData = B.Data;
+    const OutData = Out.Data;
     for (let I = 0; I < M; I++) {
+      const RowOut = I * N;
       for (let P = 0; P < K; P++) {
-        const AVal = A.Data[I * K + P];
+        const AVal = AData[I * K + P];
         if (AVal === 0) continue;
-        for (let J = 0; J < N; J++) Out.Data[I * N + J] += AVal * B.Data[P * N + J];
+        const RowB = P * N;
+        for (let J = 0; J < N; J++) OutData[RowOut + J] += AVal * BData[RowB + J];
       }
     }
   } else if (Backend.MatMulInto !== undefined) {
@@ -49,24 +83,7 @@ export function MatMul(A: Tensor, B: Tensor): Tensor {
     const BackwardBackend = Backend;
     Out.BackwardFn = () => {
       if (BackwardBackend === null) {
-        // I,P,J order: the inner J loop reads B.Data / writes B.Grad with stride 1 (cache-friendly,
-        // matching the forward's ikj order) instead of the old I,J,P which strode B by N — a large
-        // constant-factor win on the hottest matmul (the LM head, where N = VocabSize). Bit-identical
-        // to the old order: A.Grad[I,P] still accumulates over J ascending, and each B.Grad[P,J] is
-        // still touched once per (ascending) I, so the floating-point accumulation order is unchanged.
-        for (let I = 0; I < M; I++) {
-          for (let P = 0; P < K; P++) {
-            const AVal = A.Data[I * K + P];
-            const IdxA = I * K + P;
-            const RowB = P * N;
-            for (let J = 0; J < N; J++) {
-              const G = Out.Grad[I * N + J];
-              if (G === 0) continue;
-              A.Grad[IdxA] += G * B.Data[RowB + J];
-              B.Grad[RowB + J] += G * AVal;
-            }
-          }
-        }
+        InlineMatMulBackward(A, B, Out, M, K, N);
         return;
       }
       if (BackwardBackend.MatMulNtAcc !== undefined && BackwardBackend.MatMulTnAcc !== undefined) {
@@ -80,11 +97,12 @@ export function MatMul(A: Tensor, B: Tensor): Tensor {
       }
       // Fallback for backends without the native backward halves (e.g. TsBackend, an older DLL):
       // dA = Out.Grad @ Bᵀ  (M,N)@(N,K) -> (M,K)
-      const DA = BackwardBackend.MatMul(Out.Grad, Transpose(B.Data, K, N), M, N, K);
-      for (let I = 0; I < M * K; I++) A.Grad[I] += DA[I];
+      const OutGrad = Out.Grad;
+      const DA = BackwardBackend.MatMul(OutGrad, TransposeBuffer(B.Data, K, N), M, N, K);
+      AccumulateInto(A.Grad, DA, M * K);
       // dB = Aᵀ @ Out.Grad  (K,M)@(M,N) -> (K,N)
-      const DB = BackwardBackend.MatMul(Transpose(A.Data, M, K), Out.Grad, K, M, N);
-      for (let I = 0; I < K * N; I++) B.Grad[I] += DB[I];
+      const DB = BackwardBackend.MatMul(TransposeBuffer(A.Data, M, K), OutGrad, K, M, N);
+      AccumulateInto(B.Grad, DB, K * N);
     };
   }
   return Out;

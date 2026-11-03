@@ -13,7 +13,7 @@
 
 import { parquetReadObjects, asyncBufferFromUrl, cachedAsyncBuffer } from "hyparquet";
 import { compressors } from "hyparquet-compressors";
-import type { WebProvider, RepoSink } from "./WebSource.ts";
+import type { WebProvider } from "./WebSource.ts";
 import type { SourceInput } from "./Ingest.ts";
 import type { DataKind } from "./DataKinds.ts";
 import { FetchWithBackoff, HttpError } from "./HttpBackoff.ts";
@@ -50,12 +50,19 @@ export type HfParquetOptions = {
   ListShards?: (Dataset: string, Config: string) => Promise<string[]>; // injected in tests
   OpenShard?: (Url: string) => Promise<AsyncBuffer>; // injected in tests; range-backed reader by default
   ReadRows?: (File: AsyncBuffer, Start: number, End: number) => Promise<ParquetRow[]>; // injected in tests
-  OnCursor?: (Shard: number, Offset: number) => void; // report progress so the caller can persist it
+  // Report the COMMITTED cursor (every row before it is stored) after each flushed batch, so the caller
+  // can persist it write-through; awaited, so a Stop/crash right after a batch never loses its cursor.
+  OnCursor?: (Shard: number, Offset: number) => void | Promise<void>;
   Sleep?: (Ms: number) => Promise<void>;
   OnRepoStart?: (Name: string) => void;
-  OnRepoReady?: RepoSink;
+  OnRepoReady?: BatchSink;
   Log?: (Message: string) => void;
 };
+
+// Batch sink: stores one flushed batch. Resolving `false` (or throwing) means the batch was NOT fully
+// stored — the cursor then stays at that batch's start so the next run re-reads it (content-hash dedup
+// makes the re-read idempotent). A plain RepoSink (resolves void) counts as success.
+export type BatchSink = (Source: string, Files: SourceInput[]) => Promise<boolean | void>;
 
 const HfBase = "https://huggingface.co";
 
@@ -100,7 +107,7 @@ export function CreateHfParquetProvider(Source: HfParquetSource, Options: HfParq
   return {
     Name: Source.Name,
     Semantics: "streaming", // more shards / languages remain to collect; cursor advances across runs
-    Fetch: async (Query: string, Limit: number): Promise<SourceInput[]> => {
+    Fetch: async (Query: string, Limit: number, Signal?: AbortSignal): Promise<SourceInput[]> => {
       const Config = Source.ConfigFor(Query);
       Options.OnRepoStart?.(`${Source.Name} ${Config} shards`);
       const Shards = await ListShards(Source.Dataset, Config);
@@ -112,7 +119,7 @@ export function CreateHfParquetProvider(Source: HfParquetSource, Options: HfParq
 
       if (Shard >= Shards.length) {
         Log(`[${Source.Name}] all ${Shards.length} shard(s) already collected (cursor past end)`);
-        Options.OnCursor?.(Shard, 0);
+        await Options.OnCursor?.(Shard, 0);
         return [];
       }
 
@@ -120,18 +127,45 @@ export function CreateHfParquetProvider(Source: HfParquetSource, Options: HfParq
       Log(`[${Source.Name}] opening shard ${Shard + 1}/${Shards.length} (range reads)…`);
       const File = await OpenShard(Shards[Shard]!);
 
+      // Committed = the row offset before which EVERY row is stored (or was a skipped stub). It only
+      // moves past a batch that fully succeeded; once any batch fails it freezes (Frozen) for the rest
+      // of the run, because a single {Shard, Offset} cursor cannot represent a hole — later batches are
+      // still stored, and the next run re-reads from the hole (dedup makes that cheap and idempotent).
+      let Committed = Offset;
+      let Frozen = false;
       let Batch: SourceInput[] = [];
+      const Unsunk: SourceInput[] = []; // no sink (CLI batch mode): collect and return everything
       let Collected = 0;
-      const Flush = async (): Promise<void> => {
-        if (Batch.length > 0 && Options.OnRepoReady !== undefined) {
-          Options.OnRepoStart?.(`${Source.Name} ${Config} (${Collected}/${Cap})`); // Stop boundary between batches
-          await Options.OnRepoReady(`${Source.Name}-${Config}`, Batch);
-          Batch = [];
+      const Stopped = (): boolean => Signal?.aborted === true;
+      // Store the pending batch, whose rows end just before EndOffset, then report the committed cursor.
+      const Flush = async (EndOffset: number): Promise<void> => {
+        if (Batch.length === 0) {
+          if (!Frozen) Committed = EndOffset; // only stubs since the last batch: nothing to lose
+          return;
         }
+        if (Options.OnRepoReady === undefined) {
+          Unsunk.push(...Batch);
+          Batch = [];
+          if (!Frozen) Committed = EndOffset;
+          return;
+        }
+        Options.OnRepoStart?.(`${Source.Name} ${Config} (${Collected}/${Cap})`); // Stop boundary between batches
+        const Pending = Batch;
+        Batch = [];
+        let Stored = false;
+        try {
+          Stored = (await Options.OnRepoReady(`${Source.Name}-${Config}`, Pending)) !== false;
+        } finally {
+          // Success or not, persist where we are BEFORE anything propagates (abort/crash-safe).
+          if (Stored && !Frozen) Committed = EndOffset;
+          else if (!Stored) Frozen = true;
+          await Options.OnCursor?.(Shard, Committed);
+        }
+        if (!Stored) Log(`[${Source.Name}] a batch was not fully stored — cursor held at shard ${Shard} offset ${Committed}`);
       };
 
       let ShardDone = false;
-      while (Collected < Cap && !ShardDone) {
+      while (Collected < Cap && !ShardDone && !Stopped()) {
         const Rows = await ReadRows(File, Offset, Offset + Window);
         if (Rows.length === 0) {
           ShardDone = true;
@@ -146,22 +180,33 @@ export function CreateHfParquetProvider(Source: HfParquetSource, Options: HfParq
           if (Mapped !== null) {
             Batch.push({ Source: Source.Name, License: Source.License, Lang: Mapped.Lang, Content: Mapped.Content, Provenance: Mapped.Provenance, Origin: "curated" });
             Collected++;
-            if (Batch.length >= BatchSize) await Flush();
+            if (Batch.length >= BatchSize) {
+              if (Stopped()) break; // Stop: drop the unstored batch; the cursor stays before it
+              await Flush(Offset + Consumed);
+            }
           }
           if (Collected >= Cap) break;
         }
         Offset += Consumed;
         if (Rows.length < Window) ShardDone = true; // last (partial) window of the shard
       }
-      await Flush();
 
-      // Advance the cursor: to the next shard if this one is finished, else stay on it at the new offset
-      // (a mid-shard cap will re-download this shard next run — the whole-shard trade-off the user chose).
-      const NextShard = ShardDone ? Shard + 1 : Shard;
-      const NextOffset = ShardDone ? 0 : Offset;
-      Options.OnCursor?.(NextShard, NextOffset);
+      if (Stopped()) {
+        // A stop request: the pending (unstored) batch is dropped and the committed cursor is reported
+        // so the next run resumes exactly after the last stored batch.
+        await Options.OnCursor?.(Shard, Committed);
+        Log(`[${Source.Name}] stopped; cursor -> shard ${Shard} offset ${Committed}`);
+        return [];
+      }
+      await Flush(Offset);
+
+      // Advance the cursor: to the next shard if this one is finished AND fully stored, else stay on it
+      // at the committed offset (a mid-shard cap will re-download this shard next run).
+      const NextShard = ShardDone && !Frozen ? Shard + 1 : Shard;
+      const NextOffset = ShardDone && !Frozen ? 0 : Committed;
+      await Options.OnCursor?.(NextShard, NextOffset);
       Log(`[${Source.Name}] collected ${Collected} docs; cursor -> shard ${NextShard} offset ${NextOffset}`);
-      return [];
+      return Unsunk;
     },
   };
 }
