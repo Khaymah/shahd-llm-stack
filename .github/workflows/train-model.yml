@@ -109,6 +109,12 @@ jobs:
             echo "MODEL_NAME=${IN_NAME:-$(pick Name)}"
             SYNTH="${IN_SYNTH:-$(jq -r '.SyntheticRunId // ""' "$P")}"
             echo "SYNTHETIC_RUN_ID=$SYNTH"
+            echo "SYNTHETIC_GENERATORS=$(jq -r '.SyntheticGenerators // ""' "$P")"
+            # SFT-only mode: start from the base checkpoint in an earlier train-model run's artifact
+            # instead of pretraining again (profile keys BaseRunId / BaseArtifact / BaseCheckpoint).
+            echo "BASE_RUN_ID=$(jq -r '.BaseRunId // ""' "$P")"
+            echo "BASE_ARTIFACT=$(jq -r '.BaseArtifact // ""' "$P")"
+            echo "BASE_CHECKPOINT=$(jq -r '.BaseCheckpoint // ""' "$P")"
           } >> "$GITHUB_ENV"
           echo "profile: $P"; cat "$P"
 
@@ -145,12 +151,29 @@ jobs:
 
       - name: Import the synthetic conversations into documents_conversation
         if: env.SYNTHETIC_RUN_ID != ''
-        run: bun run sft:import Runs/SyntheticSft/SyntheticSft.jsonl
+        run: bun run sft:import Runs/SyntheticSft/SyntheticSft.jsonl ${SYNTHETIC_GENERATORS:+--Generators=$SYNTHETIC_GENERATORS}
+
+      - name: Download the base model (SFT-only profile)
+        if: env.BASE_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BASE_ARTIFACT }}
+          path: Runs/Base
+          run-id: ${{ env.BASE_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Register the downloaded base and its tokenizer
+        if: env.BASE_RUN_ID != ''
+        run: |
+          cp Runs/Base/Tokenizer.$TOKENIZER_VERSION.json Data/
+          bun run Scripts/RegisterCheckpoint.ts --File=Runs/Base/$BASE_CHECKPOINT --Name=${MODEL_NAME}Base
 
       - name: Train the tokenizer from the spec mix
+        if: env.BASE_RUN_ID == ''
         run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=$TOKENIZER_VERSION --Force
 
       - name: Pretrain the base (epoch-capped, stops gracefully at the time cap)
+        if: env.BASE_RUN_ID == ''
         run: |
           mkdir -p Runs
           STOP=Runs/stop-pretrain
@@ -185,7 +208,8 @@ jobs:
             echo
             echo "Trained by the train-model workflow (run ${{ github.run_id }}, commit ${{ github.sha }})."
             echo "Profile: $PROFILE · spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · heads $HEADS · pretrain epochs $EPOCHS · SFT steps $SFT_STEPS."
-            echo "Synthetic SFT: ${SYNTHETIC_RUN_ID:-none} (run id of the Synthesize SFT workflow)."
+            echo "Synthetic SFT: ${SYNTHETIC_RUN_ID:-none} (run id of the Synthesize SFT workflow)${SYNTHETIC_GENERATORS:+, generators $SYNTHETIC_GENERATORS}."
+            echo "Base: ${BASE_RUN_ID:+downloaded from run $BASE_RUN_ID ($BASE_CHECKPOINT)}${BASE_RUN_ID:-pretrained in this run}."
             echo
             echo '```bash'
             echo "bun run serve --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # OpenAI-compatible on 127.0.0.1:8080"

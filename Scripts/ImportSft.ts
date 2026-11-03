@@ -5,6 +5,7 @@
 //
 //   bun run sft:import Runs/SyntheticSft/SyntheticSft.jsonl
 //   bun run sft:import --In=Runs/Sft/shard-0.jsonl,Runs/Sft/shard-1.jsonl
+//   bun run sft:import SyntheticSft.jsonl --Generators=tools,multiturn,textbook   # only these generators
 
 import { existsSync, readFileSync } from "node:fs";
 import { ParseSynthRecords } from "../Brain/Sft/Synthetic/SynthRecord.ts";
@@ -26,6 +27,12 @@ if (Files.length === 0) {
   process.exit(1);
 }
 
+// --Generators=a,b: import only records from these generators (the rest are counted and skipped).
+// Used to keep a generator whose output failed a quality review out of a training run without
+// regenerating the dataset (e.g. grounded answers that did not match the question's task).
+const OnlyGenerators = ReadArg("--Generators=", "").split(",").map((Name) => Name.trim()).filter((Name) => Name !== "");
+const SkippedByGenerator = new Map<string, number>();
+
 const Records: SynthRecord[] = [];
 for (const File of Files) {
   if (!existsSync(File)) {
@@ -33,9 +40,16 @@ for (const File of Files) {
     process.exit(1);
   }
   const Parsed = ParseSynthRecords(readFileSync(File, "utf8"));
-  Records.push(...Parsed.Records);
+  for (const Record of Parsed.Records) {
+    if (OnlyGenerators.length === 0 || OnlyGenerators.includes(Record.Generator)) Records.push(Record);
+    else SkippedByGenerator.set(Record.Generator, (SkippedByGenerator.get(Record.Generator) ?? 0) + 1);
+  }
   console.log(`${File}: ${Parsed.Records.length} records${Parsed.Invalid.length > 0 ? `, ${Parsed.Invalid.length} malformed lines skipped` : ""}`);
   for (const Bad of Parsed.Invalid.slice(0, ShownInvalidLines)) console.warn(`  line ${Bad.Line}: ${Bad.Reason}`);
+}
+
+if (SkippedByGenerator.size > 0) {
+  console.log(`sft:import: --Generators=${OnlyGenerators.join(",")} skipped ${[...SkippedByGenerator].map(([Name, N]) => `${Name} ${N}`).join(", ")}`);
 }
 
 const Stores = ResolveFoundryStores();
