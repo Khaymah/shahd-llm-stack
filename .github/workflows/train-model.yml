@@ -140,18 +140,24 @@ jobs:
           bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC
           bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status
 
-      - name: Download the SyntheticSft artifact (when a synthesis run is given)
+      # Every SyntheticSft* artifact of the run: the merged one when the merge job ran, and the per-shard
+      # ones always (a cancelled synthesis run still uploads its shards). Import dedups by content hash,
+      # so the merged file and the shards it was built from never double-count.
+      - name: Download the synthetic SFT artifacts (when a synthesis run is given)
         if: env.SYNTHETIC_RUN_ID != ''
         uses: actions/download-artifact@v4
         with:
-          name: SyntheticSft
+          pattern: SyntheticSft*
+          merge-multiple: true
           path: Runs/SyntheticSft
           run-id: ${{ env.SYNTHETIC_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Import the synthetic conversations into documents_conversation
         if: env.SYNTHETIC_RUN_ID != ''
-        run: bun run sft:import Runs/SyntheticSft/SyntheticSft.jsonl ${SYNTHETIC_GENERATORS:+--Generators=$SYNTHETIC_GENERATORS}
+        run: |
+          ls -la Runs/SyntheticSft
+          bun run sft:import Runs/SyntheticSft/*.jsonl ${SYNTHETIC_GENERATORS:+--Generators=$SYNTHETIC_GENERATORS}
 
       - name: Download the base model (SFT-only profile)
         if: env.BASE_RUN_ID != ''
