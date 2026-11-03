@@ -1,0 +1,410 @@
+# Parallel training of a bigger model on free GitHub runners (the repository is public: standard
+# runners cost nothing and up to 20 jobs run at once). One 4-core runner trains a 22M-parameter model on
+# only ~10M tokens in its 6-hour limit; K runners training together and averaging their weights after
+# every round (Local SGD — Brain/Checkpoint/AverageCheckpoints.ts) multiply that by K.
+#
+#   prepare   ingest the profile's spec (once), train the tokenizer, snapshot the corpus (pg_dump)
+#   round 1-8 K workers each train StepsPerRound steps from the same checkpoint, then average
+#             (.github/workflows/parallel-round.yml)
+#   finalize  import the synthetic SFT data, SFT the averaged base, evaluate on the frozen suite + the
+#             held-out code, upload the model as an artifact
+#
+# Profile: Data/TrainProfiles/<profile>.json with a Parallel block {Workers, Rounds, StepsPerRound,
+# RoundMinutes, IngestMinutes}. Rounds must equal the 8 round jobs below. Start it by pushing a branch
+# `parallel/<profile>-<anything>` (e.g. parallel/diverse-1) or from the Actions tab (manual run).
+name: Train in parallel
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Training profile from Data/TrainProfiles with a Parallel block"
+        default: "diverse"
+  push:
+    branches: ["parallel/**"]
+
+concurrency:
+  group: train-parallel-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read # download the synthetic SFT artifacts of another run
+
+env:
+  DATABASE_URL: postgres://shahd:shahd@localhost:5432/shahd
+
+jobs:
+  prepare:
+    name: ingest → tokenizer → corpus snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      profile: ${{ steps.profile.outputs.profile }}
+      workers: ${{ steps.profile.outputs.workers }}
+      steps_per_round: ${{ steps.profile.outputs.steps_per_round }}
+      total_steps: ${{ steps.profile.outputs.total_steps }}
+      round_minutes: ${{ steps.profile.outputs.round_minutes }}
+      name: ${{ steps.profile.outputs.name }}
+      spec: ${{ steps.profile.outputs.spec }}
+      tokenizer: ${{ steps.profile.outputs.tokenizer }}
+      embed: ${{ steps.profile.outputs.embed }}
+      layers: ${{ steps.profile.outputs.layers }}
+      heads: ${{ steps.profile.outputs.heads }}
+      batch: ${{ steps.profile.outputs.batch }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shahd
+          POSTGRES_PASSWORD: shahd
+          POSTGRES_DB: shahd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shahd"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the training profile
+        id: profile
+        env:
+          IN_PROFILE: ${{ github.event.inputs.profile }}
+        run: |
+          PROFILE="$IN_PROFILE"
+          if [ -z "$PROFILE" ]; then
+            case "$GITHUB_REF" in
+              refs/heads/parallel/*) PROFILE="${GITHUB_REF#refs/heads/parallel/}"; PROFILE="${PROFILE%%-*}"; PROFILE="${PROFILE%%/*}" ;;
+            esac
+          fi
+          P="Data/TrainProfiles/${PROFILE}.json"
+          [ -f "$P" ] || { echo "::error::no profile $P"; exit 1; }
+          jq -e '.Parallel' "$P" > /dev/null || { echo "::error::$P has no Parallel block"; exit 1; }
+          ROUNDS=$(jq -r '.Parallel.Rounds' "$P")
+          [ "$ROUNDS" = "8" ] || { echo "::error::this workflow runs 8 rounds; $P asks for $ROUNDS"; exit 1; }
+          K=$(jq -r '.Parallel.Workers' "$P")
+          H=$(jq -r '.Parallel.StepsPerRound' "$P")
+          {
+            echo "profile=$PROFILE"
+            echo "workers=$(jq -c -n "[range(0; $K)]")"
+            echo "steps_per_round=$H"
+            echo "total_steps=$((ROUNDS * H))"
+            echo "round_minutes=$(jq -r '.Parallel.RoundMinutes' "$P")"
+            echo "name=$(jq -r '.Name' "$P")"
+            echo "spec=$(jq -r '.Spec' "$P")"
+            echo "tokenizer=$(jq -r '.Tokenizer' "$P")"
+            echo "embed=$(jq -r '.Embed' "$P")"
+            echo "layers=$(jq -r '.Layers' "$P")"
+            echo "heads=$(jq -r '.Heads' "$P")"
+            echo "batch=$(jq -r '.Batch' "$P")"
+          } >> "$GITHUB_OUTPUT"
+          echo "INGEST_MINUTES=$(jq -r '.Parallel.IngestMinutes' "$P")" >> "$GITHUB_ENV"
+          echo "FOUNDRY_SPEC=$(jq -r '.Spec' "$P")" >> "$GITHUB_ENV"
+          echo "TOKENIZER_VERSION=$(jq -r '.Tokenizer' "$P")" >> "$GITHUB_ENV"
+          cat "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile
+
+      - name: Create the Foundry schema
+        run: bun run foundry:migrate
+
+      - name: Collect the corpus from the spec (time-capped; every finished repo is kept)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          timeout -s INT "$((INGEST_MINUTES))m" bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC
+          CODE=$?
+          set -e
+          if [ "$CODE" = "124" ]; then echo "::warning::ingest hit the ${INGEST_MINUTES}-minute cap; training uses what was collected"; elif [ "$CODE" != "0" ]; then exit "$CODE"; fi
+          bun run foundry:ingest-spec --Spec=$FOUNDRY_SPEC --Status | tee Runs-ingest-status.txt
+          { echo "### Corpus"; echo '```'; cat Runs-ingest-status.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Train the tokenizer from the spec mix
+        run: bun run train:bpe --Spec=$FOUNDRY_SPEC --Version=$TOKENIZER_VERSION --Force
+
+      - name: Snapshot the corpus
+        run: |
+          mkdir -p Runs/Corpus
+          pg_dump -Fc --no-owner --no-privileges --exclude-table-data=checkpoints -d "$DATABASE_URL" -f Runs/Corpus/corpus.dump
+          cp Data/Tokenizer.$TOKENIZER_VERSION.json Runs-ingest-status.txt Runs/Corpus/
+          ls -la Runs/Corpus
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParallelCorpus
+          path: Runs/Corpus/
+          retention-days: 30
+          if-no-files-found: error
+
+  round1:
+    needs: prepare
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 1
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round2:
+    needs: [prepare, round1]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 2
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round3:
+    needs: [prepare, round2]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 3
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round4:
+    needs: [prepare, round3]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 4
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round5:
+    needs: [prepare, round4]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 5
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round6:
+    needs: [prepare, round5]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 6
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round7:
+    needs: [prepare, round6]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 7
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  round8:
+    needs: [prepare, round7]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }} # a lost worker does not stop the run
+    uses: ./.github/workflows/parallel-round.yml
+    with:
+      round: 8
+      workers: ${{ needs.prepare.outputs.workers }}
+      total_steps: ${{ fromJSON(needs.prepare.outputs.total_steps) }}
+      steps_per_round: ${{ fromJSON(needs.prepare.outputs.steps_per_round) }}
+      round_minutes: ${{ fromJSON(needs.prepare.outputs.round_minutes) }}
+      name: ${{ needs.prepare.outputs.name }}
+      spec: ${{ needs.prepare.outputs.spec }}
+      tokenizer: ${{ needs.prepare.outputs.tokenizer }}
+      embed: ${{ fromJSON(needs.prepare.outputs.embed) }}
+      layers: ${{ fromJSON(needs.prepare.outputs.layers) }}
+      heads: ${{ fromJSON(needs.prepare.outputs.heads) }}
+      batch: ${{ fromJSON(needs.prepare.outputs.batch) }}
+
+  finalize:
+    name: SFT → full evaluation → artifact
+    needs: [prepare, round8]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shahd
+          POSTGRES_PASSWORD: shahd
+          POSTGRES_DB: shahd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shahd"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      MODEL_NAME: ${{ needs.prepare.outputs.name }}
+      PROFILE: ${{ needs.prepare.outputs.profile }}
+      FOUNDRY_SPEC: ${{ needs.prepare.outputs.spec }}
+      TOKENIZER_VERSION: ${{ needs.prepare.outputs.tokenizer }}
+      EMBED: ${{ needs.prepare.outputs.embed }}
+      LAYERS: ${{ needs.prepare.outputs.layers }}
+      HEADS: ${{ needs.prepare.outputs.heads }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the SFT settings from the profile
+        run: |
+          P="Data/TrainProfiles/$PROFILE.json"
+          {
+            echo "SFT_STEPS=$(jq -r '.SftSteps' "$P")"
+            echo "SYNTHETIC_RUN_ID=$(jq -r '.SyntheticRunId // ""' "$P")"
+            echo "SYNTHETIC_GENERATORS=$(jq -r '.SyntheticGenerators // ""' "$P")"
+          } >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: GoKernels/go.mod
+      - run: bun install --frozen-lockfile
+
+      - name: Build the Go/C FFI kernel (AVX2 with scalar fallback)
+        working-directory: GoKernels/ffi
+        run: go build -buildmode=c-shared -o ../matmul.dll ./
+
+      - name: Download the corpus snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: ParallelCorpus
+          path: Runs/Corpus
+
+      - name: Download the final averaged base
+        uses: actions/download-artifact@v4
+        with:
+          name: Global-r8
+          path: Runs/Global
+
+      - name: Restore the corpus, the tokenizer and the base
+        run: |
+          pg_restore --no-owner --no-privileges -d "$DATABASE_URL" Runs/Corpus/corpus.dump
+          cp "Runs/Corpus/Tokenizer.$TOKENIZER_VERSION.json" Data/
+          bun run Scripts/RegisterCheckpoint.ts --File="Runs/Global/$MODEL_NAME.ckpt" --Name="${MODEL_NAME}Base"
+
+      - name: Download the synthetic SFT artifacts
+        if: env.SYNTHETIC_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SyntheticSft*
+          merge-multiple: true
+          path: Runs/SyntheticSft
+          run-id: ${{ env.SYNTHETIC_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import the synthetic conversations
+        if: env.SYNTHETIC_RUN_ID != ''
+        run: bun run sft:import Runs/SyntheticSft/*.jsonl ${SYNTHETIC_GENERATORS:+--Generators=$SYNTHETIC_GENERATORS}
+
+      - name: SFT the chat model from the averaged base
+        run: |
+          bun run Scripts/TrainSftChat.ts --From=${MODEL_NAME}Base --Name=$MODEL_NAME \
+            --Spec=$FOUNDRY_SPEC --Tokenizer=Data/Tokenizer.$TOKENIZER_VERSION.json --Steps=$SFT_STEPS \
+            --EmbedDim=$EMBED --Layers=$LAYERS --Heads=$HEADS --Batch=8 --Workers=4 --Precision=F32 \
+            --CodeSamples=600 --Arithmetic=600 --Thinking=300 --CodeConvs=300 --MultiTurn=600 \
+            --ConvCount=20000
+
+      - name: Evaluate (base on held-out code + a sample, chat model on the full suite)
+        run: |
+          bun run eval --Checkpoint=${MODEL_NAME}Base --HeldOut=Data/Eval/HeldOutV1.jsonl --MaxCases=8 --WriteMeta
+          bun run eval --Checkpoint=$MODEL_NAME --HeldOut=Data/Eval/HeldOutV1.jsonl --MaxCases=0 \
+            --Baseline=Checkpoints/${MODEL_NAME}Base.ckpt --WriteMeta
+
+      - name: Write the model card
+        run: |
+          mkdir -p Release
+          cp Checkpoints/${MODEL_NAME}.ckpt Checkpoints/${MODEL_NAME}Base.ckpt Data/Tokenizer.$TOKENIZER_VERSION.json Runs/Corpus/Runs-ingest-status.txt Release/
+          cp Runs/Eval/*.json Release/
+          {
+            echo "# $MODEL_NAME"
+            echo
+            echo "Trained in parallel by the train-parallel workflow (run ${{ github.run_id }}, commit ${{ github.sha }})."
+            echo "Profile: $PROFILE · spec: $FOUNDRY_SPEC · embed $EMBED · layers $LAYERS · heads $HEADS · SFT steps $SFT_STEPS."
+            echo "Workers ${{ needs.prepare.outputs.workers }} · ${{ needs.prepare.outputs.total_steps }} steps per worker, averaged every ${{ needs.prepare.outputs.steps_per_round }}."
+            echo "Synthetic SFT: ${SYNTHETIC_RUN_ID:-none}${SYNTHETIC_GENERATORS:+, generators $SYNTHETIC_GENERATORS}."
+            echo
+            echo '```bash'
+            echo "bun run serve --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # OpenAI-compatible on 127.0.0.1:8080"
+            echo "bun run eval  --Checkpoint=Checkpoints/${MODEL_NAME}.ckpt          # the frozen suite"
+            echo '```'
+          } > Release/README.md
+          ls -la Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MODEL_NAME }}
+          path: Release/
+          retention-days: 90
+          if-no-files-found: error

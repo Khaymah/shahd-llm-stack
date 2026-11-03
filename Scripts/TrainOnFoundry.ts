@@ -7,6 +7,7 @@
 //   bun run Scripts/TrainOnFoundry.ts --Measure                 # time a few steps, then stop
 //   bun run Scripts/TrainOnFoundry.ts --Steps=2000 --Save=Checkpoints/Foundry.ckpt
 //   bun run Scripts/TrainOnFoundry.ts --Spec=Data/Spec.json --Steps=20000   # recipe v2 (see MODEL-SCALING)
+//   ... --Steps=5600 --UntilStep=700 --DataSeed=3 --Export=Runs/W3.ckpt   # one parallel-round segment
 //
 // Recipe v2 knobs: --Spec samples the mix PER SLICE of the Data Spec (context, epoch cap, WSD schedule
 // default from it); --Tokenizer reuses a persisted tokenizer (default Data/Tokenizer.v1.json when it
@@ -37,7 +38,7 @@ import type { Checkpoint } from "../Brain/Checkpoint/CheckpointFormat.ts";
 import { PostgresCheckpointStore } from "../Foundry/PostgresCheckpointStore.ts";
 import { ActivateFromConfig } from "../Brain/ComputeBackend/BackendSelector.ts";
 import { CheckpointFile, ResolveFoundryStores } from "./FoundryEnv.ts";
-import { ReadArg, ReadFlag, ReadFloatArg } from "./ScriptArgs.ts";
+import { ReadArg, ReadFlag, ReadFloatArg, ReadIntArg } from "./ScriptArgs.ts";
 import { AssembleSpecMix, CheckEpochs, ChooseTokenizerFile, DecideResume, DescribeMix, PickMerges, PretrainSources, PretrainSpecials, ResolveSpec, SpecTotalMb, StepsForEpochs, StopFilePredicate } from "./TrainingCorpus.ts";
 import { LoadBpeModel } from "../Brain/Tokenizer/Internal/BpeModelFile.ts";
 
@@ -293,6 +294,16 @@ if (Resume !== null) {
   ApplyCheckpoint(Resume.Ckpt, Model, Optimizer, Rng); // restore weights + optimizer + RNG state
   StartStep = Resume.Step;
 }
+// Parallel training (.github/workflows/train-parallel.yml): K workers start every round from the SAME
+// averaged checkpoint, so each one re-seeds its batch and dropout streams (--DataSeed) to draw
+// different batches; weights init from Config.Training.Seed stays shared, so round-1 workers agree.
+const DataSeed = ReadIntArg("--DataSeed", -1, { Min: -1 });
+if (DataSeed >= 0) {
+  const Reseeded = CreateRngStreams(DataSeed);
+  Rng.DataRng.SetState(Reseeded.DataRng.GetState());
+  Rng.DropoutRng.SetState(Reseeded.DropoutRng.GetState());
+  console.log(`data seed ${DataSeed}: batch and dropout streams re-seeded`);
+}
 // Sequence-parallel pool (after ApplyCheckpoint so the shared weights start from the restored
 // values; ApplyCheckpoint itself writes in place, so resume order would work either way).
 const Pool = Config.Training.Workers > 0 ? await CreateTrainWorkerPool(Model, Config) : null;
@@ -324,12 +335,32 @@ if (Measure) {
 // (--StopFile appears — the dashboard's Stop button) saves at the EXACT step instead: TrainLoop polls
 // the file once per step and returns early, we checkpoint at that step and exit 0.
 const ShouldStop = StopFilePredicate(ReadArg("--StopFile=", ""));
+// --UntilStep: train one SEGMENT of the full schedule (a parallel round) and stop there; the LR
+// schedule still spans all EffectiveSteps. --Export: also write the last checkpoint to this file.
+const UntilStep = ReadIntArg("--UntilStep", 0, { Min: 0 }); // 0 = the whole schedule
+const StopAt = UntilStep === 0 ? EffectiveSteps : Math.min(UntilStep, EffectiveSteps);
+if (StopAt <= StartStep) {
+  console.error(`--UntilStep=${UntilStep} must be above the start step ${StartStep}`);
+  if (CkptStore !== null) await CkptStore.Close();
+  process.exit(1);
+}
+const ExportPath = ReadArg("--Export=", "");
 const CheckEvery = Math.max(50, Math.floor(EffectiveSteps / 20)); // ~20 saves across the run
 function BuildAt(Step: number): Checkpoint {
   return BuildCheckpoint(Model, Optimizer, Rng, { FinalStep: EffectiveSteps, Step, Corpus: "foundry-filtered" }, { Kind: "Bpe", Merges: Bpe.Merges, Specials: BaseSpecials });
 }
-for (let Start = StartStep; Start < EffectiveSteps; Start += CheckEvery) {
-  const End = Math.min(Start + CheckEvery, EffectiveSteps);
+async function Finish(Ckpt: Checkpoint, Message: string): Promise<never> {
+  if (ExportPath !== "") {
+    WriteCheckpointObject(ExportPath, Ckpt);
+    console.log(`exported ${ExportPath}`);
+  }
+  console.log(Message);
+  if (CkptStore !== null) await CkptStore.Close();
+  Pool?.Dispose();
+  process.exit(0);
+}
+for (let Start = StartStep; Start < StopAt; Start += CheckEvery) {
+  const End = Math.min(Start + CheckEvery, StopAt);
   const Reached = TrainLoop(Model, Optimizer, TrainLoader, ValLoader, Config, RunLogger, OnStep, { StartStep: Start, EndStep: End, StartMs: GlobalStart }, Pool, ShouldStop);
   const Ckpt = BuildAt(Reached);
   if (CkptStore !== null) {
@@ -338,12 +369,9 @@ for (let Start = StartStep; Start < EffectiveSteps; Start += CheckEvery) {
   } else {
     WriteCheckpointObject(SavePath, Ckpt);
   }
-  if (Reached < End) {
-    console.log(`paused by user at step ${Reached}/${EffectiveSteps} — checkpoint saved; press Train again to resume from exactly here`);
-    if (CkptStore !== null) await CkptStore.Close();
-    Pool?.Dispose();
-    process.exit(0);
-  }
+  if (Reached < End) await Finish(Ckpt, `paused at step ${Reached}/${EffectiveSteps} — checkpoint saved; press Train again to resume from exactly here`);
+  if (End === StopAt && StopAt < EffectiveSteps) await Finish(Ckpt, `segment done at step ${StopAt}/${EffectiveSteps}`);
+  if (End === EffectiveSteps && ExportPath !== "") WriteCheckpointObject(ExportPath, Ckpt);
 }
 if (CkptStore !== null) {
   await CkptStore.Close();

@@ -38,6 +38,7 @@ export const DataSpecSchema = z.object({
     PathGlobs: z.array(z.string().min(1)), // on top of CodeFileFilter's built-in list
     MinFileBytes: z.number().int().positive(),
     MaxFileBytes: z.number().int().positive(),
+    MaxRepoKb: z.number().int().positive().optional(), // per-repo byte cap (diversity specs); default: none
   }),
   Training: z.object({
     MaxEpochs: z.number().positive(), // the memorisation guard: tokens seen / unique tokens must stay below this

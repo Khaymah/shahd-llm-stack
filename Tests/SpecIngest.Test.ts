@@ -258,3 +258,22 @@ test("unsafe repo names and refs never reach a URL", async () => {
   expect(await Provider.Fetch("", 10)).toEqual([]);
   expect(GitHub.Downloads).toEqual([]);
 });
+
+test("MaxRepoKb keeps a deterministic hash-ordered sample of each repo under the byte cap", async () => {
+  const Names = Array.from({ length: 12 }, (_, I) => `Module${I}`);
+  const Files = Object.fromEntries(Names.map((Name) => [`src/${Name}.ts`, Code(Name)]));
+  const Reversed = Object.fromEntries(Object.entries(Files).reverse()); // same files, other archive order
+  const Cap = { ...Bounds, MaxRepoKb: 2 };
+  const Kept = async (Repo: Record<string, string>): Promise<string[]> => {
+    const GitHub = await FakeGitHub({ "acme/big": { License: "MIT", Files: Repo } });
+    const Provider = CreateGitHubRepoListProvider([{ Repo: "acme/big", Slice: "ts" }], { Http: GitHub.Http, FetchBytes: GitHub.FetchBytes, Bounds: Cap, SliceOfLang, Log: Quiet });
+    const Docs = await Provider.Fetch("", 10);
+    const Bytes = Docs.reduce((Sum, Doc) => Sum + Buffer.byteLength(Doc.Content, "utf8"), 0);
+    expect(Bytes).toBeLessThanOrEqual(2 * 1024);
+    return Docs.map((Doc) => Doc.Provenance).sort();
+  };
+  const First = await Kept(Files);
+  expect(First.length).toBeGreaterThan(0);
+  expect(First.length).toBeLessThan(Names.length);
+  expect(await Kept(Reversed)).toEqual(First); // the sample depends on paths, not on archive order
+});
