@@ -11,46 +11,9 @@ function AuthHeaders(Token: string | undefined, Accept: string): Record<string, 
   return Headers;
 }
 
-// Rate limits: a spec of hundreds of repos spends ~2 API calls per repo, past the hourly budget of a
-// CI token. A 403/429 that GitHub marks as rate limiting (x-ratelimit-remaining: 0, or Retry-After) is
-// waited out and retried instead of failing the repo — up to MaxRateLimitWaitMs per wait.
-export const MaxRateLimitWaitMs = 65 * 60 * 1000;
-const RateLimitRetries = 3;
-const RateLimitSlackMs = 5000;
-const MsPerSecond = 1000;
-
-/** How long to wait before retrying a response, or null when it is not a rate-limit response. */
-export function RateLimitWaitMs(Status: number, Headers: Pick<globalThis.Headers, "get">, NowMs: number): number | null {
-  if (Status !== 403 && Status !== 429) return null;
-  const RetryAfter = Number(Headers.get("retry-after") ?? "");
-  if (Number.isFinite(RetryAfter) && RetryAfter > 0) return Math.min(RetryAfter * MsPerSecond, MaxRateLimitWaitMs);
-  if (Headers.get("x-ratelimit-remaining") !== "0") return null;
-  const ResetAt = Number(Headers.get("x-ratelimit-reset") ?? "") * MsPerSecond;
-  if (!Number.isFinite(ResetAt) || ResetAt <= 0) return null;
-  return Math.min(Math.max(ResetAt - NowMs, 0) + RateLimitSlackMs, MaxRateLimitWaitMs);
-}
-
-/** fetch() that waits out GitHub rate limiting (see RateLimitWaitMs). */
-async function FetchWithRateLimit(Url: string, Init: { headers: Record<string, string>; signal?: AbortSignal }): Promise<Response> {
-  for (let Attempt = 0; ; Attempt++) {
-    const Response = await fetch(Url, Init);
-    const WaitMs = Attempt < RateLimitRetries ? RateLimitWaitMs(Response.status, Response.headers, Date.now()) : null;
-    if (WaitMs === null) return Response;
-    console.warn(`[github] rate limited on ${Url} — waiting ${Math.round(WaitMs / MsPerSecond)}s`);
-    await Response.body?.cancel();
-    await new Promise<void>((Resolve, Reject) => {
-      const Timer = setTimeout(Resolve, WaitMs);
-      Init.signal?.addEventListener("abort", () => {
-        clearTimeout(Timer);
-        Reject(new Error("aborted while waiting for the GitHub rate limit"));
-      }, { once: true });
-    });
-  }
-}
-
 export function DefaultGitHubJson(Token?: string): HttpJson {
   return async (Url: string, Signal?: AbortSignal): Promise<unknown> => {
-    const Response = await FetchWithRateLimit(Url, { headers: AuthHeaders(Token, "application/vnd.github+json"), signal: Signal });
+    const Response = await fetch(Url, { headers: AuthHeaders(Token, "application/vnd.github+json"), signal: Signal });
     if (!Response.ok) throw new Error(`GitHub API ${Response.status}`);
     return Response.json();
   };
@@ -66,7 +29,7 @@ export const MaxTarballBytes = 256_000_000;
 
 export function DefaultGitHubBytes(Token?: string, MaxBytes: number = MaxTarballBytes): FetchBytes {
   return async (Url: string, Signal?: AbortSignal): Promise<Uint8Array> => {
-    const Response = await FetchWithRateLimit(Url, { headers: AuthHeaders(Token, "application/vnd.github+json"), signal: Signal });
+    const Response = await fetch(Url, { headers: AuthHeaders(Token, "application/vnd.github+json"), signal: Signal });
     if (!Response.ok) throw new Error(`GitHub API ${Response.status}`);
     const Declared = Number(Response.headers.get("content-length") ?? "");
     if (Number.isFinite(Declared) && Declared > MaxBytes) {
@@ -107,7 +70,7 @@ export function DefaultGitHubBytes(Token?: string, MaxBytes: number = MaxTarball
 // when the repo has no license file (404) or on any API error — the caller treats that as unresolved.
 export type RepoLicense = { Spdx: string; Text: string };
 export async function FetchRepoLicense(FullName: string, Token?: string): Promise<RepoLicense | null> {
-  const Response = await FetchWithRateLimit(`https://api.github.com/repos/${FullName}/license`, { headers: AuthHeaders(Token, "application/vnd.github+json") });
+  const Response = await fetch(`https://api.github.com/repos/${FullName}/license`, { headers: AuthHeaders(Token, "application/vnd.github+json") });
   if (!Response.ok) return null;
   const Body = (await Response.json()) as { license?: { spdx_id?: string }; content?: string; encoding?: string };
   const Text = Body.content !== undefined && Body.encoding === "base64" ? Buffer.from(Body.content, "base64").toString("utf8") : "";

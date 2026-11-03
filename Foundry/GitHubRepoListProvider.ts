@@ -6,17 +6,13 @@
 //   3. the file's language must map to a slice the spec wants (and to the entry's Slice, when set),
 //   4. raw size within [MinFileBytes, MaxFileBytes],
 //   5. the built-in CodeFileFilter path gate (vendored/dist/dotfiles/config/lockfiles) — with the
-//      curation opt-ins below — then PrepareRepoFile (per-file license header + content gate),
-//   6. the optional per-repo byte cap (MaxRepoKb): a diversity spec of hundreds of repos keeps a
-//      deterministic sample of each — files ordered by sha256(path), kept until the cap — so a few
-//      large repos cannot fill a slice and teach the model one codebase's style.
+//      curation opt-ins below — then PrepareRepoFile (per-file license header + content gate).
 // Curation opt-ins: the built-in gate drops test, docs, example and migration directories because a
 // QUERY-driven crawl cannot judge them. A spec can: test directories / `.test.` files are always
 // opted back in (an entry drops them with Exclude — the spec wants ~10% tests), and doc/site/example/
 // migration directories are opted back in only when the Include glob that matched names them
 // literally (e.g. "docs/**"). Markdown (.md/.mdx) is collected as Lang "markdown" for the docs slice.
 
-import { createHash } from "node:crypto";
 import { parseTarGzip } from "nanotar";
 import type { WebProvider, RepoSink } from "./WebSource.ts";
 import type { SourceInput } from "./Ingest.ts";
@@ -32,7 +28,7 @@ import { IsPermissive } from "../Brain/Data/LicenseManifest.ts";
 export type RepoListEntry = { Repo: string; Ref?: string; Include?: string[]; Exclude?: string[]; Slice?: string };
 
 /** The spec's global file rules (structurally compatible with DataSpec["Exclusions"]). */
-export type FileBounds = { PathGlobs: readonly string[]; MinFileBytes: number; MaxFileBytes: number; MaxRepoKb?: number };
+export type FileBounds = { PathGlobs: readonly string[]; MinFileBytes: number; MaxFileBytes: number };
 
 /** What happened to one repository (one tarball) — the per-repo audit line. */
 export type RepoListInfo = {
@@ -188,15 +184,6 @@ type ExtractContext = {
   SliceOfLang: (Lang: string) => string | null;
 };
 
-const BytesPerKb = 1024;
-
-/** Deterministic, path-only order for the per-repo cap: the same tarball always yields the same sample,
- *  and the sample spreads over the whole tree instead of the first directories of the archive. */
-function OrderByPathHash<T extends { name: string }>(Items: readonly T[]): T[] {
-  const Key = (Name: string): string => createHash("sha256").update(StripRoot(Name)).digest("hex");
-  return Items.map((Item) => ({ Item, Hash: Key(Item.name) })).sort((A, B) => (A.Hash < B.Hash ? -1 : A.Hash > B.Hash ? 1 : 0)).map((E) => E.Item);
-}
-
 /** Walk one tarball and turn every file the spec wants into a SourceInput (first matching entry wins). */
 async function ExtractListedFiles(Gz: Uint8Array, Context: ExtractContext): Promise<{ Inputs: SourceInput[]; Info: RepoListInfo; Conflicts: number }> {
   // Path + size selection runs in nanotar's filter, so unwanted entries (most of a big monorepo) are
@@ -218,15 +205,13 @@ async function ExtractListedFiles(Gz: Uint8Array, Context: ExtractContext): Prom
   });
   const Inputs: SourceInput[] = [];
   const Info: RepoListInfo = { Repo: Context.Repo, Ref: Context.Ref, License: Context.License, Ingested: true, Files: 0, Bytes: 0, BySlice: {} };
-  const CapBytes = Context.Bounds.MaxRepoKb === undefined ? Number.POSITIVE_INFINITY : Context.Bounds.MaxRepoKb * BytesPerKb;
   let Conflicts = 0;
-  for (const Item of CapBytes === Number.POSITIVE_INFINITY ? Items : OrderByPathHash(Items)) {
+  for (const Item of Items) {
     const Selected = Selection.get(Item.name);
     if (Selected === undefined) continue;
     const Path = StripRoot(Item.name);
     const File = PrepareRepoFile(Path, Item.text, { MinBytes: Context.Bounds.MinFileBytes, MaxBytes: Context.Bounds.MaxFileBytes, Lang: Selected.Lang });
     if (File === null) continue;
-    if (Info.Bytes + Buffer.byteLength(File.Content, "utf8") > CapBytes) continue; // a smaller file may still fit
     const Decision = ResolveFileLicense(Context.License, File.Header);
     if (Decision.Conflict) Conflicts++;
     Inputs.push({
